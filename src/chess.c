@@ -154,6 +154,14 @@ char fileNumToChar(int);
 void boardToArray(int*, Board*);
 void setupPosition(int*, Board*);
 int outOfBounds(int);
+void generateMoves(MoveList*, Board*);
+void generateWhiteMoves(MoveList*, Board);
+void generateBlackMoves(MoveList*, Board);
+Move* atIndexMoveList(MoveList*, int);
+void moveToString(char*, Move*);
+void outputMove(Move*);
+void outputMoveList(MoveList*);
+
 
 // Assign some memory for ml
 void initMoveList(MoveList* ml, int initSize) {
@@ -175,6 +183,14 @@ void insertMoveList(MoveList* ml, Move m) {
 		}
 	}
 	ml->list[ml->used++] = m;
+}
+
+// Return pointer to Move at index
+Move* atIndexMoveList(MoveList* ml, int index) {
+	if((index < 0) || (index >= ml->size)) {
+		printf("ERROR: INDEX OUT OF BOUNDS"); return NULL;
+	}
+	return &(ml->list[index]);
 }
 
 // Reset ml, freeing memory
@@ -254,6 +270,29 @@ int outOfBounds(int i) {
 	int file = i % BOARD_WIDTH;
 	// 1st two conditions are above/below
 	return (i < BOARD_TOP_LEFT) || (i > BOARD_BOTTOM_RIGHT) || (file < BOARD_LEFT_PADDING) || (file >= BOARD_RIGHT_PADDING + 8);
+}
+
+// Put algebraic representation of m into first 4 chars of s
+void moveToString(char* s, Move* m) {
+	indexToAlgebraic(s, m->from);
+	indexToAlgebraic(&s[2], m->to);
+}
+
+// Output ASCII representation of m to std.out
+void outputMove(Move* m) {
+	char s[4];
+	moveToString(s, m);
+	printf("%c%c-%c%c", s[0], s[1], s[2], s[3]);
+}
+
+void outputMoveList(MoveList* ml) {
+	int i;
+	Move* m;
+	for(i=0; i<ml->used; i++) {
+		m = atIndexMoveList(ml, i);
+		outputMove(m);
+		printf("\n");
+	}
 }
 
 // Output ASCII representation of b to std.out
@@ -525,36 +564,62 @@ void makeMoveInPlace(Board* b, Move m) {
 	// TODO: Handle special moves
 }
 
+void generateWhiteMoves(MoveList* ml, Board b) {
+	insertMoveList(ml, createMove(E2, E4));
+	insertMoveList(ml, createMove(A8, H8));
+	insertMoveList(ml, createMove(H1, A8));
+	insertMoveList(ml, createMove(C3, D5));
+	insertMoveList(ml, createMove(E7, E4));
+	insertMoveList(ml, createMove(B1, H7));
+	outputMoveList(ml);
+}
+
+void generateBlackMoves(MoveList* ml, Board b) {
+	outputBoard(&b);
+}
+
+void generateMoves(MoveList* ml, Board* b) {
+	switch(b->player) {
+		case WHITE:
+			generateWhiteMoves(ml, *b); break;
+		case BLACK:
+			generateBlackMoves(ml, *b); break;
+	}
+}
+
 void test() {
 	Board pos = startingPosition();
-	outputBoard(&pos);
+	// outputBoard(&pos);
+	MoveList ml;
+	initMoveList(&ml, 10);
+	generateMoves(&ml, &pos);
 	Board pos2 = makeMove(pos, createMove(A2, A3));
 	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(D7, D5));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(A3, A4));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(D5, D4));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(A1, A3));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(F7, F5));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(A3, A1));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(F5, F4));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createMove(E2, E4));
-	outputBoard(&pos2);
-	pos2 = makeMove(pos2, createSpecialMove(D4, E3, 0, pos2.enPassantFlag, 0));
-	outputBoard(&pos2);
-
-	int array[64];
-	boardToArray(array, &pos2);
-	array[0] = B_BISHOP;
-	array[1] = B_ROOK;
-	setupPosition(array, &pos2);
-	outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(D7, D5));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(A3, A4));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(D5, D4));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(A1, A3));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(F7, F5));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(A3, A1));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(F5, F4));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createMove(E2, E4));
+	// outputBoard(&pos2);
+	// pos2 = makeMove(pos2, createSpecialMove(D4, E3, 0, pos2.enPassantFlag, 0));
+	// outputBoard(&pos2);
+	//
+	// int array[64];
+	// boardToArray(array, &pos2);
+	// array[0] = B_BISHOP;
+	// array[1] = B_ROOK;
+	// setupPosition(array, &pos2);
+	// outputBoard(&pos2);
 	// int i;
 	// for(i=0; i<64; i++) {
 	// 	printf("%c ", pieceToChar(array[i]));
