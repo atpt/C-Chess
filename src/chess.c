@@ -146,12 +146,19 @@ typedef struct {
 	int player; 					// WHITE/BLACK
 } Board;
 
-// Dynamically expanding array of moves; for generation and AI
+// Dynamically expanding array of Moves; for generation and AI
 typedef struct {
 	Move* list;
 	int used;
 	int size;
 } MoveList;
+
+// Dynamically expanding stack of Boards, for game tree traversal
+typedef struct {
+	Board* list;
+	int used;
+	int size;
+} BoardStack;
 
 // Forward declare everything so we don't have to worry about order of defns
 Board createBoard(int*, int, int, int);
@@ -160,7 +167,8 @@ Move createMove(int, int);
 Move createSpecialMove(int, int, int, int, int);
 Board makeMove(Board, Move);
 void makeMoveInPlace(Board*, Move);
-void test();
+void testBoard();
+void testPerft();
 char pieceToChar(int);
 char indexToRankChar(int);
 int indexToRank(int);
@@ -180,7 +188,13 @@ void initMoveList(MoveList*, int);
 void insertMoveList(MoveList*, Move);
 void insertMoveListReference(MoveList*, Move*);
 void freeMoveList(MoveList*);
-Move* atIndexMoveList(MoveList*, int);
+Move atIndexMoveList(MoveList*, int);
+void initBoardStack(BoardStack*, int);
+void pushBoardStack(BoardStack*, Board);
+void pushBoardStackReference(BoardStack*, Board*);
+Board* atIndexBoardStack(BoardStack*, int);
+Board popBoardStack(BoardStack*);
+void freeBoardStack(BoardStack*);
 void moveToString(char*, Move*);
 void outputMove(Move*);
 void outputMoveList(MoveList*);
@@ -191,10 +205,9 @@ int isBlackPiece(int);
 int isPiece(int);
 int attackedByBlack(Board*, int);
 int attackedByWhite(Board*, int);
+long perft(Board,int);
 
 void initGlobalArrays() {
-
-
 
 	// 2 rows 1 columns, or 2 columns 1 row
 	KNIGHT_MOVES = malloc(8 * sizeof(int));
@@ -286,11 +299,11 @@ void insertMoveListReference(MoveList* ml, Move* m) {
 }
 
 // Return pointer to Move at index
-Move* atIndexMoveList(MoveList* ml, int index) {
+Move atIndexMoveList(MoveList* ml, int index) {
 	if((index < 0) || (index >= ml->size)) {
-		printf("ERROR: INDEX OUT OF BOUNDS"); return NULL;
+		printf("ERROR: INDEX OUT OF BOUNDS"); return createMove(0,0);
 	}
-	return &(ml->list[index]);
+	return (ml->list[index]);
 }
 
 // Reset ml, freeing memory
@@ -299,6 +312,64 @@ void freeMoveList(MoveList* ml) {
 	ml->list = NULL;
 	ml->used = ml->size = 0;
 }
+
+// Assign some memory for bs
+void initBoardStack(BoardStack* bs, int initSize) {
+	bs->list = malloc(initSize * sizeof(Board));
+	if(bs->list == NULL) {
+		printf("ERROR: MALLOC FAILED\n"); return;
+	}
+	bs->used = 0;
+	bs->size = initSize;
+}
+
+// Push another Board to bs, expanding as needed
+void pushBoardStack(BoardStack* bs, Board b) {
+	if(bs->used == bs->size) {
+		bs->size *= 2;
+		bs->list = realloc(bs->list, bs->size * sizeof(Board));
+		if(bs->list == NULL) {
+			printf("ERROR: REALLOC FAILED\n"); return;
+		}
+	}
+	bs->list[bs->used++] = b;
+}
+
+// Push another Board to bs, expanding as needed
+void pushBoardStackReference(BoardStack* bs, Board* b) {
+	if(bs->used == bs->size) {
+		bs->size *= 2;
+		bs->list = realloc(bs->list, bs->size * sizeof(Board));
+		if(bs->list == NULL) {
+			printf("ERROR: REALLOC FAILED\n"); return;
+		}
+	}
+	bs->list[bs->used++] = *b;
+}
+
+// Return pointer to Board at index
+Board* atIndexBoardStack(BoardStack* bs, int index) {
+	if((index < 0) || (index >= bs->size)) {
+		printf("ERROR: INDEX OUT OF BOUNDS"); return NULL;
+	}
+	return &(bs->list[index]);
+}
+
+// Remove and return Board from top of bs
+Board popBoardStack(BoardStack* bs) {
+	if(bs->used == 0) {
+		printf("ERROR: EMPTY STACK"); return startingPosition();
+	}
+	return bs->list[--(bs->used)];
+}
+
+// Reset bs, freeing memory
+void freeBoardStack(BoardStack* bs) {
+	free(bs->list);
+	bs->list = NULL;
+	bs->used = bs->size = 0;
+}
+
 
 // Return ASCII representation of piece
 char pieceToChar(int piece) {
@@ -423,11 +494,11 @@ void outputMove(Move* m) {
 
 void outputMoveList(MoveList* ml) {
 	int i;
-	Move* m;
+	Move m;
 	for(i=0; i<ml->used; i++) {
 		m = atIndexMoveList(ml, i);
 		printf("%d. ",i);
-		outputMove(m);
+		outputMove(&m);
 		printf("\n");
 	}
 	printf("\n");
@@ -840,14 +911,16 @@ int attackedByWhite(Board* b, int square) {
 	return FALSE;
 }
 
-void generateWhiteMoves(MoveList* ml, Board b) {
-	int fromIndex, fromPiece, toIndex, toPiece, i, j, rank, kingPosition, removalCount;
-	kingPosition = 0;
-	Move* m;
+void generateWhiteMoves(MoveList* output, Board b) {
+	int fromIndex, fromPiece, toIndex, toPiece, i, j, rank, kingPosition, oldKingPosition, removalCount;
+	oldKingPosition = 0;
+	Move m;
 	Board tempBoard;
 	int* removals;
 	removalCount = 0;
-	MoveList newList;
+	MoveList mlList;
+	initMoveList(&mlList, 10);
+	MoveList *ml = &mlList;
 	for(fromIndex=BOARD_TOP_LEFT; fromIndex<BOARD_BOTTOM_RIGHT; fromIndex++) {
 		fromPiece = b.square[fromIndex];
 		switch(fromPiece) {
@@ -973,7 +1046,7 @@ void generateWhiteMoves(MoveList* ml, Board b) {
 				}
 				break;
 			case W_KING:
-				kingPosition = fromIndex;
+				oldKingPosition = fromIndex;
 				for(i=0; i<8; i++) {
 					toIndex = fromIndex + KING_MOVES[i];
 					toPiece = b.square[toIndex];
@@ -1002,34 +1075,35 @@ void generateWhiteMoves(MoveList* ml, Board b) {
 	for(i=0; i<(ml->used); i++) {
 		removals[i] = FALSE;
 		m = atIndexMoveList(ml, i);
-		// King moves are already checked for legality above
-		if(b.square[m->from] != W_KING) {
-			tempBoard = makeMove(b, *m);
-			// outputBoard(&tempBoard); // For debugging
-			if(attackedByBlack(&tempBoard, kingPosition)) {
-				removals[i] = TRUE;
-				removalCount++;
-			}
+		// King moves change kingPosition
+		kingPosition = (b.square[m.from] == W_KING) ? m.to : oldKingPosition;
+		tempBoard = makeMove(b, m);
+		// outputBoard(&tempBoard); // For debugging
+		if(attackedByBlack(&tempBoard, kingPosition)) {
+			removals[i] = TRUE;
+			removalCount++;
 		}
 	}
-	initMoveList(&newList, (ml->used) - removalCount);
+	initMoveList(output, (ml->used) - removalCount);
 	for(i=0; i<(ml->used); i++) {
 		if(!removals[i]) {
-			insertMoveListReference(&newList, atIndexMoveList(ml, i));
+			insertMoveList(output, atIndexMoveList(ml, i));
 		}
 	}
-	ml = &newList;
-	// outputMoveList(ml); // For debugging
+	freeMoveList(ml);
+	// outputMoveList(output); // For debugging
 }
 
-void generateBlackMoves(MoveList* ml, Board b) {
-	int fromIndex, fromPiece, toIndex, toPiece, i, j, rank, kingPosition, removalCount;
-	kingPosition = 0;
-	Move* m;
+void generateBlackMoves(MoveList* outputList, Board b) {
+	int fromIndex, fromPiece, toIndex, toPiece, i, j, rank, kingPosition, oldKingPosition, removalCount;
+	oldKingPosition = 0;
+	Move m;
 	Board tempBoard;
 	int* removals;
 	removalCount = 0;
-	MoveList newList;
+	MoveList mlList;
+	initMoveList(&mlList, 10);
+	MoveList *ml = &mlList;
 	for(fromIndex=BOARD_TOP_LEFT; fromIndex<BOARD_BOTTOM_RIGHT; fromIndex++) {
 		fromPiece = b.square[fromIndex];
 		switch(fromPiece) {
@@ -1152,7 +1226,7 @@ void generateBlackMoves(MoveList* ml, Board b) {
 				}
 				break;
 			case B_KING:
-				kingPosition = fromIndex;
+				oldKingPosition = fromIndex;
 				for(i=0; i<8; i++) {
 					toIndex = fromIndex + KING_MOVES[i];
 					toPiece = b.square[toIndex];
@@ -1177,24 +1251,23 @@ void generateBlackMoves(MoveList* ml, Board b) {
 	for(i=0; i<(ml->used); i++) {
 		removals[i] = FALSE;
 		m = atIndexMoveList(ml, i);
-		// King moves are already checked for legality above
-		if(b.square[m->from] != W_KING) {
-			tempBoard = makeMove(b, *m);
-			// outputBoard(&tempBoard); // For debugging
-			if(attackedByWhite(&tempBoard, kingPosition)) {
-				removals[i] = TRUE;
-				removalCount++;
-			}
+
+		kingPosition = (b.square[m.from] == B_KING) ? m.to : oldKingPosition;
+		tempBoard = makeMove(b, m);
+		// outputBoard(&tempBoard); // For debugging
+		if(attackedByWhite(&tempBoard, kingPosition)) {
+			removals[i] = TRUE;
+			removalCount++;
 		}
 	}
-	initMoveList(&newList, (ml->used) - removalCount);
+	initMoveList(outputList, (ml->used) - removalCount);
 	for(i=0; i<(ml->used); i++) {
 		if(!removals[i]) {
-			insertMoveListReference(&newList, atIndexMoveList(ml, i));
+			insertMoveList(outputList, atIndexMoveList(ml, i));
 		}
 	}
-	ml = &newList;
-	// outputMoveList(ml); // For debugging
+	freeMoveList(ml);
+	// outputMoveList(outputList); // For debugging
 }
 
 void generateMoves(MoveList* ml, Board* b) {
@@ -1206,7 +1279,25 @@ void generateMoves(MoveList* ml, Board* b) {
 	}
 }
 
-void test() {
+// Count all legal move sequences of length <= depth, from position b
+long perft(Board b, int depth) {
+	// printf("Depth: %d\n", depth);
+	// outputBoard(&b);
+	if(depth == 0) {
+		return 1;
+	} else {
+		MoveList ml;
+		generateMoves(&ml, &b);
+		int i;
+		long total = 0;
+		for(i=0; i<ml.used; i++) {
+			total += perft(makeMove(b, atIndexMoveList(&ml, i)), depth - 1);
+		}
+		return total;
+	}
+}
+
+void testBoard() {
 	Board pos = startingPosition();
 
 	pos = makeMove(pos, createMove(E2, E4));
@@ -1219,7 +1310,7 @@ void test() {
 	pos = makeMove(pos, createMove(G8, H6));
 	pos = makeMove(pos, createMove(A2, A3));
 	pos = makeMove(pos, createSpecialMove(E8, G8, B_KSIDE_CASTLE, 0, 0));
-	pos = makeMove(pos, createMove(C4, A2));
+	// pos = makeMove(pos, createMove(C4, A2));
 	// pos = makeMove(pos, createMove(F2, F4));
 	// pos = makeMove(pos, createMove(C5, B6));
 	// pos = makeMove(pos, createSpecialMove(E1, G1, W_KSIDE_CASTLE, 0, 0));
@@ -1229,13 +1320,13 @@ void test() {
 
 	outputBoard(&pos);
 
-	MoveList ml;
-	initMoveList(&ml, 10);
-	generateMoves(&ml, &pos);
+	MoveList out;
+	// initMoveList(&ml, 10);
+	generateMoves(&out, &pos);
 
+	outputMoveList(&out);
 
-
-	freeMoveList(&ml);
+	freeMoveList(&out);
 
 	// Board pos2 = makeMove(pos, createMove(A2, A3));
 	// outputBoard(&pos2);
@@ -1282,9 +1373,16 @@ void test() {
 
 }
 
+void testPerft() {
+	Board b = startingPosition();
+	long result = perft(b, 6);
+	printf("%ld\n", result);
+}
+
 int main() {
 	initGlobalArrays();
-	test();
+	// testBoard();
+	testPerft();
 	freeGlobalArrays();
 	return 0;
 }
