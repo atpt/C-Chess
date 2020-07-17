@@ -3,10 +3,17 @@
 
 // Truth values
 #define FALSE 0
-#define TRUE 1
+#define TRUE 	1
 //Colours
 #define WHITE 0
 #define BLACK 1
+// Results
+#define UNFINISHED 	0
+#define WHITE_WIN 	1
+#define BLACK_WIN 	2
+#define STALEMATE 	3
+#define REPITION  	4
+#define FIFTY_MOVE 5
 // Flag info
 #define W_KSIDE_CASTLE 1
 #define W_QSIDE_CASTLE 2
@@ -15,31 +22,31 @@
 #define FULL_CASTLING_RIGHTS (W_KSIDE_CASTLE | W_QSIDE_CASTLE | B_KSIDE_CASTLE | B_QSIDE_CASTLE)
 // The following refer to the REPRESENTATION of the board
 // Lookup 'mailbox representation' for details
-#define BOARD_WIDTH 10
-#define BOARD_HEIGHT 12
-#define BOARD_TOP_PADDING 2 // Rows of OUT OF BOARD spaces above
-#define BOARD_LEFT_PADDING 1 // Columns of OUT OF BOARD spaces to left
-#define BOARD_RIGHT_PADDING 1
-#define BOARD_BOTTOM_PADDING 2
+#define BOARD_WIDTH 	10
+#define BOARD_HEIGHT 	12
+#define BOARD_TOP_PADDING 		2 // Rows of OUT OF BOARD spaces above
+#define BOARD_LEFT_PADDING 		1 // Columns of OUT OF BOARD spaces to left
+#define BOARD_RIGHT_PADDING 	1
+#define BOARD_BOTTOM_PADDING 	2
 #define BOARD_SIZE (BOARD_WIDTH * BOARD_HEIGHT)
 // Limits of actual playing board within representation
 #define BOARD_TOP_LEFT ((BOARD_TOP_PADDING * BOARD_WIDTH) + BOARD_LEFT_PADDING)
 #define BOARD_BOTTOM_RIGHT (BOARD_SIZE - ((BOARD_BOTTOM_PADDING * BOARD_WIDTH) + BOARD_RIGHT_PADDING))
 // Square values
-#define OOB -1 // Off edge of board; surround board to help move gen
-#define EMPTY 0
-#define W_PAWN 1
-#define W_KNIGHT 2
-#define W_BISHOP 3
-#define W_ROOK 4
-#define W_QUEEN 5
-#define W_KING 6
-#define B_PAWN 7
-#define B_KNIGHT 8
-#define B_BISHOP 9
-#define B_ROOK 10
-#define B_QUEEN 11
-#define B_KING 12
+#define OOB 			-1 // Off edge of board; surround board to help move gen
+#define EMPTY 		0
+#define W_PAWN 		1
+#define W_KNIGHT 	2
+#define W_BISHOP 	3
+#define W_ROOK 		4
+#define W_QUEEN 	5
+#define W_KING 		6
+#define B_PAWN 		7
+#define B_KNIGHT 	8
+#define B_BISHOP 	9
+#define B_ROOK 		10
+#define B_QUEEN 	11
+#define B_KING 		12
 // Squares (unwieldy, but avoids a lot of magic numbers later)
 #define A1 91
 #define B1 92
@@ -114,12 +121,12 @@
 #define H8 28
 
 // Piece movement constants
-#define WHITE_PAWN_ADVANCE -BOARD_WIDTH
-#define WHITE_PAWN_CAPTURE_L (-BOARD_WIDTH)-1
-#define WHITE_PAWN_CAPTURE_R (-BOARD_WIDTH)+1
-#define BLACK_PAWN_ADVANCE BOARD_WIDTH
-#define BLACK_PAWN_CAPTURE_L BOARD_WIDTH-1
-#define BLACK_PAWN_CAPTURE_R BOARD_WIDTH+1
+#define WHITE_PAWN_ADVANCE 		-BOARD_WIDTH
+#define WHITE_PAWN_CAPTURE_L 	(-BOARD_WIDTH)-1
+#define WHITE_PAWN_CAPTURE_R 	(-BOARD_WIDTH)+1
+#define BLACK_PAWN_ADVANCE 		BOARD_WIDTH
+#define BLACK_PAWN_CAPTURE_L 	BOARD_WIDTH-1
+#define BLACK_PAWN_CAPTURE_R 	BOARD_WIDTH+1
 
 // Piece movement arrays
 int* KNIGHT_MOVES;
@@ -175,6 +182,7 @@ int indexToRank(int);
 void outputBoard(Board*);
 int changePlayer(Board*);
 void indexToAlgebraic(char*, int);
+int algebraicToIndex(char*);
 void printAlgebraic(int);
 char rankNumToChar(int);
 char fileNumToChar(int);
@@ -206,6 +214,12 @@ int isPiece(int);
 int attackedByBlack(Board*, int);
 int attackedByWhite(Board*, int);
 long perft(Board,int);
+int twoPlayerGame();
+Move inputPlayerMove(MoveList*);
+Move createMoveFromAlgebraic(char*);
+int scorePosition(Board*);
+int blackInCheck(Board*);
+int whiteInCheck(Board*);
 
 void initGlobalArrays() {
 
@@ -465,6 +479,15 @@ void indexToAlgebraic(char* s, int ind) {
 	s[1] = rankNumToChar(rank);
 }
 
+int algebraicToIndex(char* s) {
+	char file = s[0];
+	char rank = s[1];
+	// Get in range 0-7
+	file -= 'a';
+	rank -= '0';
+	return (BOARD_TOP_LEFT + file) + ((8 - rank) * (8 + BOARD_LEFT_PADDING + BOARD_RIGHT_PADDING));
+}
+
 // Put a string representation of board index ind to std.out
 void printAlgebraic(int ind) {
 	char s[2];
@@ -489,7 +512,13 @@ void moveToString(char* s, Move* m) {
 void outputMove(Move* m) {
 	char s[4];
 	moveToString(s, m);
-	printf("%c%c-%c%c", s[0], s[1], s[2], s[3]);
+	printf("%c%c%c%c", s[0], s[1], s[2], s[3]);
+}
+
+Move createMoveFromAlgebraic(char* s) {
+	int from = algebraicToIndex(s);
+	int to = algebraicToIndex(&s[2]);
+	return createMove(from, to);
 }
 
 void outputMoveList(MoveList* ml) {
@@ -1297,6 +1326,63 @@ long perft(Board b, int depth) {
 	}
 }
 
+int whiteInCheck(Board* b) {
+	int kingPosition, i;
+	kingPosition = 0;
+	for(i=BOARD_TOP_LEFT; i<=BOARD_BOTTOM_RIGHT; i++) {
+		if(b->square[i] == W_KING) {
+			kingPosition = i; break;
+		}
+	}
+	return attackedByBlack(b, kingPosition);
+}
+
+int blackInCheck(Board* b) {
+	int kingPosition, i;
+	kingPosition = 0;
+	for(i=BOARD_TOP_LEFT; i<=BOARD_BOTTOM_RIGHT; i++) {
+		if(b->square[i] == B_KING) {
+			kingPosition = i; break;
+		}
+	}
+	return attackedByWhite(b, kingPosition);
+}
+
+// Assess the result of a game
+int scorePosition(Board* b) {
+	MoveList moves;
+	generateMoves(&moves, b);
+	if(moves.used == 0) {
+		if(whiteInCheck(b)) {
+			return BLACK_WIN;
+		} else if(blackInCheck(b)) {
+			return WHITE_WIN;
+		} else {
+			return STALEMATE;
+		}
+	}
+	return UNFINISHED;
+}
+
+Move inputPlayerMove(MoveList *ml) {
+	char inp[5];
+	Move m;
+	while(TRUE) {
+		printf("Enter a move (e.g.");
+		outputMove(&(ml->list[0]));
+		printf("): ");
+		gets(inp);
+		m = createMoveFromAlgebraic(inp);
+		// printf("test\n");
+		// outputMove(&m);
+		for(int i=0; i<ml->used; i++) {
+			if((m.to == (ml->list[i]).to) && (m.from == (ml->list[i]).from)) {
+				return ml->list[i];
+			}
+		}
+	}
+}
+
 void testBoard() {
 	Board pos = startingPosition();
 
@@ -1328,49 +1414,6 @@ void testBoard() {
 
 	freeMoveList(&out);
 
-	// Board pos2 = makeMove(pos, createMove(A2, A3));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(D7, D5));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(A3, A4));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(D5, D4));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(A1, A3));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(F7, F5));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(A3, A1));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(F5, F4));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createMove(E2, E4));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createSpecialMove(D4, E3, 0, pos2.enPassantFlag, 0));
-	// outputBoard(&pos2);
-	//
-	// int array[64];
-	// boardToArray(array, &pos2);
-	// array[0] = B_BISHOP;
-	// array[1] = B_ROOK;
-	// setupPosition(array, &pos2);
-	// outputBoard(&pos2);
-	// int i;
-	// for(i=0; i<64; i++) {
-	// 	printf("%c ", pieceToChar(array[i]));
-	// }
-
-
-	// pos2 = makeMove(pos2, createSpecialMove(E1, G1, W_KSIDE_CASTLE, 0, 0));
-	// // pos2 = makeMove(pos2, createMove(H1, F1));
-	// outputBoard(&pos2);
-	// pos2 = makeMove(pos2, createSpecialMove(E8, G8, B_KSIDE_CASTLE, 0, 0));
-	// outputBoard(&pos2);
-	// printf("%d\n", changePlayer(&pos));
-	// outputBoard(&pos);
-	// printf("%d\n", changePlayer(&pos));
-	// outputBoard(&pos);
-
 }
 
 void testPerft() {
@@ -1379,10 +1422,43 @@ void testPerft() {
 	printf("%ld\n", result);
 }
 
+int twoPlayerGame() {
+	Board b = startingPosition();
+	Move playerMove;
+	MoveList legalMoves;
+	int result;
+	while(TRUE) {
+		outputBoard(&b);
+		generateMoves(&legalMoves, &b);
+		if(legalMoves.used == 0) {
+			printf("GAMEOVER\n"); break;
+		}
+		playerMove = inputPlayerMove(&legalMoves);
+		b = makeMove(b, playerMove);
+	}
+	printf("RESULT: ");
+	result = scorePosition(&b);
+	switch(result) {
+		case WHITE_WIN:
+			printf("White won!"); break;
+		case BLACK_WIN:
+			printf("Black won!"); break;
+		case STALEMATE:
+			printf("Draw by stalemate."); break;
+		case REPITION:
+			printf("Draw by threefold repetition."); break;
+		case FIFTY_MOVE:
+			printf("Draw by fifty move rule."); break;
+	}
+	printf("\n");
+	return result;
+}
+
 int main() {
 	initGlobalArrays();
 	// testBoard();
-	testPerft();
+	// testPerft();
+	twoPlayerGame();
 	freeGlobalArrays();
 	return 0;
 }
