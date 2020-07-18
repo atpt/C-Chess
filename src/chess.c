@@ -1,5 +1,6 @@
 #import <stdio.h>
 #import <stdlib.h>
+#import <limits.h>
 
 // Truth values
 #define FALSE 0
@@ -8,12 +9,12 @@
 #define WHITE 0
 #define BLACK 1
 // Results
-#define UNFINISHED 	0
 #define WHITE_WIN 	1
 #define BLACK_WIN 	2
 #define STALEMATE 	3
-#define REPITION  	4
+#define THREEFOLD  	4
 #define FIFTY_MOVE 5
+#define UNFINISHED 	6
 // Flag info
 #define W_KSIDE_CASTLE 1
 #define W_QSIDE_CASTLE 2
@@ -32,8 +33,9 @@
 // Limits of actual playing board within representation
 #define BOARD_TOP_LEFT ((BOARD_TOP_PADDING * BOARD_WIDTH) + BOARD_LEFT_PADDING)
 #define BOARD_BOTTOM_RIGHT (BOARD_SIZE - ((BOARD_BOTTOM_PADDING * BOARD_WIDTH) + BOARD_RIGHT_PADDING))
-// Square values
-#define OOB 			-1 // Off edge of board; surround board to help move gen
+// Square values: if these take values out of range [0-13], PIECE_VALUES array
+// is liable to break
+#define OOB 			13 // Off edge of board; surround board to help move gen
 #define EMPTY 		0
 #define W_PAWN 		1
 #define W_KNIGHT 	2
@@ -134,6 +136,8 @@ int* BISHOP_MOVES;
 int* ROOK_MOVES;
 int* QUEEN_MOVES;
 int* KING_MOVES;
+//Piece value array
+int* PIECE_VALUES;
 
 typedef struct {
 	int from;
@@ -221,6 +225,10 @@ Move createMoveFromAlgebraic(char*);
 int scorePosition(Board*);
 int blackInCheck(Board*);
 int whiteInCheck(Board*);
+int heuristicEval(Board*);
+int negamax(Board b, int depth);
+int evaluateMove(Board* b, Move m, int depth);
+Move ai(Board*, int, int);
 
 void initGlobalArrays() {
 
@@ -268,6 +276,22 @@ void initGlobalArrays() {
 	KING_MOVES[6] = 1;
 	KING_MOVES[7] = -1;
 
+	PIECE_VALUES = malloc(14 * sizeof(int));
+	PIECE_VALUES[OOB] 			= 0;
+	PIECE_VALUES[EMPTY] 		= 0;
+	PIECE_VALUES[W_PAWN] 		= 100;
+	PIECE_VALUES[W_KNIGHT] 	= 300;
+	PIECE_VALUES[W_BISHOP]	= 320;
+	PIECE_VALUES[W_ROOK]		= 500;
+	PIECE_VALUES[W_QUEEN]		= 950;
+	PIECE_VALUES[B_PAWN]		= -100;
+	PIECE_VALUES[B_KNIGHT]	= -300;
+	PIECE_VALUES[B_BISHOP]	= -320;
+	PIECE_VALUES[B_ROOK] 		= -500;
+	PIECE_VALUES[B_QUEEN]		= -950;
+	PIECE_VALUES[W_KING]		= 0;
+	PIECE_VALUES[B_KING]		= 0;
+
 }
 
 void freeGlobalArrays() {
@@ -277,6 +301,8 @@ void freeGlobalArrays() {
 	free(ROOK_MOVES);
 	free(QUEEN_MOVES);
 	free(KING_MOVES);
+
+	free(PIECE_VALUES);
 }
 
 // Assign some memory for ml
@@ -390,7 +416,7 @@ void freeBoardStack(BoardStack* bs) {
 char pieceToChar(int piece) {
 	switch(piece) {
 		case OOB:
-			return 0;
+			return 'x';
 		case EMPTY:
 			return ' ';
 		case W_PAWN:
@@ -1422,6 +1448,33 @@ int blackInCheck(Board* b) {
 	return attackedByWhite(b, kingPosition);
 }
 
+int samePosition(Board* b1, Board* b2) {
+	int i;
+	for(i=BOARD_TOP_LEFT; i<=BOARD_BOTTOM_RIGHT; i++) {
+		if(b1->square[i] != b2->square[i]) {
+			return FALSE;
+		}
+	}
+	return (b1->player == b2->player) && (b1->castlingFlags == b2->castlingFlags) && (b1->enPassantFlag == b2->enPassantFlag);
+}
+
+int detectThreefold(BoardStack gameHistory) {
+	int numBoard = gameHistory.used;
+	if(numBoard < 3) {
+		return FALSE;
+	}
+	int i, j;
+	Board currentPosition = gameHistory.list[numBoard-1];
+	for(j=0; j<numBoard-1; j++) {
+		for(i=j+1; i<numBoard-1; i++) {
+			if(samePosition(&currentPosition, &gameHistory.list[j]) && samePosition(&currentPosition, &gameHistory.list[i])) {
+				return TRUE;
+			}
+		}
+	}
+	return FALSE;
+}
+
 // Assess the result of a game
 int scorePosition(Board* b) {
 	MoveList moves;
@@ -1458,6 +1511,131 @@ Move inputPlayerMove(MoveList *ml) {
 			}
 		}
 	}
+}
+
+// Return value of b in centipawns. +ve is good for white.
+// >100 likely to be winning for white, <-100 likely winning for black
+int heuristicEval(Board* b) {
+	int i, score;
+	score = 0;
+	for(i=BOARD_TOP_LEFT; i<=BOARD_BOTTOM_RIGHT; i++) {
+		score += PIECE_VALUES[b->square[i]];
+	}
+	return score;
+}
+
+int negamax(Board b, int depth) {
+	// if(depth > 1) {
+	// 	printf("\nNegamax called with depth %d and position:\n", depth);
+	// 	outputBoard(&b);
+	// }
+	if(depth == 0) {
+		return heuristicEval(&b);
+	}
+	MoveList ml;
+	generateMoves(&ml, &b);
+	int numMoves = ml.used;
+	if(ml.used == 0) {
+		switch(scorePosition(&b)) {
+			case WHITE_WIN:
+				// printf("Returning 10000 (checkmate)");
+				return 10000;
+			case BLACK_WIN:
+				// printf("Returning -10000 (checkmate)");
+				return -10000;
+			default:
+				// printf("Returning 0 (draw)");
+				return 0;
+		}
+	}
+	int *scores = malloc(numMoves * sizeof(int));
+	int bestScore;
+	// int bestIndex = 0;
+	if(b.player == WHITE) {
+		// Maximising player
+		bestScore = INT_MIN;
+		for(int i=0; i<numMoves; i++) {
+			scores[i] = negamax(makeMove(b, ml.list[i]), depth - 1);
+			if(scores[i] > bestScore) {
+				bestScore = scores[i];
+				if(bestScore >= 10000) {
+					return bestScore;
+				}
+				// bestIndex = i;
+			}
+		}
+	} else {
+		// Minimising player
+		bestScore = INT_MAX;
+		for(int i=0; i<numMoves; i++) {
+			scores[i] = negamax(makeMove(b, ml.list[i]), depth - 1);
+			if(scores[i] < bestScore) {
+				bestScore = scores[i];
+				if(bestScore <= -10000) {
+					return bestScore;
+				}
+				// bestIndex = i;
+			}
+		}
+	}
+	// printf("Returning: %d", bestScore);
+	return bestScore;
+}
+
+int evaluateMove(Board* b, Move m, int depth) {
+	// printf("\nEvaluating: ");
+	// outputMove(&m);
+	// printf("\n");
+	Board after = makeMove(*b, m);
+	return negamax(after, depth);
+}
+
+Move ai(Board* b, int depth, int verbose) {
+	if(verbose) {
+		outputBoard(b);
+	}
+	MoveList ml;
+	generateMoves(&ml, b);
+	int numMoves = ml.used;
+	if(ml.used == 0) {
+		printf("Error: No legal moves.\n");
+		return createMove(-1,-1);
+	}
+	int *scores = malloc(numMoves * sizeof(int));
+	int bestScore;
+	int bestIndex = 0;
+	if(b->player == WHITE) {
+		// Maximising player
+		bestScore = INT_MIN;
+		for(int i=0; i<numMoves; i++) {
+			scores[i] = evaluateMove(b, ml.list[i], depth);
+			if(verbose == TRUE) {
+				printf("\nFinal score for move: ");
+				outputMove(&ml.list[i]);
+				printf(": %d\n", scores[i]);
+			}
+			if(scores[i] > bestScore) {
+				bestScore = scores[i];
+				bestIndex = i;
+			}
+		}
+	} else {
+		// Minimising player
+		bestScore = INT_MAX;
+		for(int i=0; i<numMoves; i++) {
+			scores[i] = evaluateMove(b, ml.list[i], depth);
+			if(verbose == TRUE) {
+				printf("\nFinal score for move: ");
+				outputMove(&ml.list[i]);
+				printf(": %d\n", scores[i]);
+			}
+			if(scores[i] < bestScore) {
+				bestScore = scores[i];
+				bestIndex = i;
+			}
+		}
+	}
+	return ml.list[bestIndex];
 }
 
 void testBoard() {
@@ -1522,7 +1700,7 @@ int twoPlayerGame() {
 			printf("Black won by checkmate!"); break;
 		case STALEMATE:
 			printf("Draw by stalemate."); break;
-		case REPITION:
+		case THREEFOLD:
 			printf("Draw by threefold repetition."); break;
 		case FIFTY_MOVE:
 			printf("Draw by fifty move rule."); break;
@@ -1531,11 +1709,83 @@ int twoPlayerGame() {
 	return result;
 }
 
+int onePlayerGame(int colour, int depth) {
+	Board b = startingPosition();
+	BoardStack bs;
+	initBoardStack(&bs, 40);
+
+	Move playerMove;
+	MoveList legalMoves;
+	int result = 0;
+	while(TRUE) {
+		pushBoardStack(&bs, b);
+		outputBoard(&b);
+		generateMoves(&legalMoves, &b);
+		if(legalMoves.used == 0) {
+			break;
+		}
+		if(detectThreefold(bs)) {
+			result = THREEFOLD;
+			break;
+		}
+		if(b.player == colour) {
+			playerMove = inputPlayerMove(&legalMoves);
+		} else {
+			playerMove = ai(&b, depth, FALSE);
+			printf("Computer moves: ");
+			outputMove(&playerMove);
+			printf("\n");
+		}
+		b = makeMove(b, playerMove);
+	}
+	printf("GAMEOVER!\nRESULT: ");
+	if(result == 0) {
+		result = scorePosition(&b);
+	}
+	switch(result) {
+		case WHITE_WIN:
+			printf("White won by checkmate!"); break;
+		case BLACK_WIN:
+			printf("Black won by checkmate!"); break;
+		case STALEMATE:
+			printf("Draw by stalemate."); break;
+		case THREEFOLD:
+			printf("Draw by threefold repetition."); break;
+		case FIFTY_MOVE:
+			printf("Draw by fifty move rule."); break;
+	}
+	printf("\n");
+	return result;
+}
+
+
+
+void testAI() {
+	int depth = 2;
+	Board pos = startingPosition();
+	pos = makeMove(pos, createMove(E2, E4));
+	pos = makeMove(pos, createMove(E7, E5));
+	pos = makeMove(pos, createMove(F1, C4));
+	pos = makeMove(pos, createMove(F8, C5));
+	pos = makeMove(pos, createMove(G1, F3));
+	pos = makeMove(pos, createMove(G8, F6));
+	pos = makeMove(pos, createMove(F3, G5));
+	pos = makeMove(pos, createMove(B8, C6));
+	// pos = makeMove(pos, createMove(D1, F3));
+	// pos = makeMove(pos, createMove(D8, E7));
+	Move m = ai(&pos, depth, TRUE);
+	printf("Best move: ");
+	outputMove(&m);
+	printf("\n");
+}
+
 int main() {
 	initGlobalArrays();
 	// testBoard();
 	// testPerft();
-	twoPlayerGame();
+	// twoPlayerGame();
+	// testAI();
+	onePlayerGame(WHITE, 3);
 	freeGlobalArrays();
 	return 0;
 }
