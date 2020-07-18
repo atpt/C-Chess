@@ -177,6 +177,7 @@ void makeMoveInPlace(Board*, Move);
 void testBoard();
 void testPerft();
 char pieceToChar(int);
+int charToPiece(char);
 char indexToRankChar(int);
 int indexToRank(int);
 void outputBoard(Board*);
@@ -421,6 +422,39 @@ char pieceToChar(int piece) {
 	}
 }
 
+int charToPiece(char c) {
+	switch(c) {
+		case ' ':
+			return EMPTY;
+		case 'P':
+			return W_PAWN;
+		case 'N':
+			return W_KNIGHT;
+		case 'B':
+			return W_BISHOP;
+		case 'R':
+			return W_ROOK;
+		case 'Q':
+			return W_QUEEN;
+		case 'K':
+			return W_KING;
+		case 'p':
+			return B_PAWN;
+		case 'n':
+			return B_KNIGHT;
+		case 'b':
+			return B_BISHOP;
+		case 'r':
+			return B_ROOK;
+		case 'q':
+			return B_QUEEN;
+		case 'k':
+			return B_KING;
+		default:
+			return OOB;
+	}
+}
+
 int isWhitePiece(int p) {
 	switch(p) {
 		case W_PAWN:
@@ -518,6 +552,10 @@ void outputMove(Move* m) {
 Move createMoveFromAlgebraic(char* s) {
 	int from = algebraicToIndex(s);
 	int to = algebraicToIndex(&s[2]);
+	if(s[4] != 0) {
+		int promotionPiece = charToPiece(s[4]);
+		return createSpecialMove(from, to, 0, 0, promotionPiece);
+	}
 	return createMove(from, to);
 }
 
@@ -990,14 +1028,32 @@ void generateWhiteMoves(MoveList* output, Board b) {
 				toIndex = fromIndex + WHITE_PAWN_CAPTURE_L;
 				toPiece = b.square[toIndex];
 				if(isBlackPiece(toPiece)) {
-					insertMoveList(ml, createMove(fromIndex, toIndex));
+					rank = indexToRank(toIndex);
+					if(rank == 8) {
+						// Promotion
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_KNIGHT));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_BISHOP));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_ROOK));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_QUEEN));
+					} else {
+						insertMoveList(ml, createMove(fromIndex, toIndex));
+					}
 				} else if(b.enPassantFlag == toIndex) {
 					insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, b.enPassantFlag, 0));
 				}
 				toIndex = fromIndex + WHITE_PAWN_CAPTURE_R;
 				toPiece = b.square[toIndex];
 				if(isBlackPiece(toPiece)) {
-					insertMoveList(ml, createMove(fromIndex, toIndex));
+					rank = indexToRank(toIndex);
+					if(rank == 8) {
+						// Promotion
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_KNIGHT));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_BISHOP));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_ROOK));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, W_QUEEN));
+					} else {
+						insertMoveList(ml, createMove(fromIndex, toIndex));
+					}
 				} else if(b.enPassantFlag == toIndex) {
 					insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, b.enPassantFlag, 0));
 				}
@@ -1173,14 +1229,32 @@ void generateBlackMoves(MoveList* outputList, Board b) {
 				toIndex = fromIndex + BLACK_PAWN_CAPTURE_L;
 				toPiece = b.square[toIndex];
 				if(isWhitePiece(toPiece)) {
-					insertMoveList(ml, createMove(fromIndex, toIndex));
+					rank = indexToRank(toIndex);
+					if(rank == 1) {
+						// Promotion
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_KNIGHT));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_BISHOP));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_ROOK));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_QUEEN));
+					} else {
+						insertMoveList(ml, createMove(fromIndex, toIndex));
+					}
 				} else if(b.enPassantFlag == toIndex) {
 					insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, b.enPassantFlag, 0));
 				}
 				toIndex = fromIndex + BLACK_PAWN_CAPTURE_R;
 				toPiece = b.square[toIndex];
 				if(isWhitePiece(toPiece)) {
-					insertMoveList(ml, createMove(fromIndex, toIndex));
+					rank = indexToRank(toIndex);
+					if(rank == 1) {
+						// Promotion
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_KNIGHT));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_BISHOP));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_ROOK));
+						insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, 0, B_QUEEN));
+					} else {
+						insertMoveList(ml, createMove(fromIndex, toIndex));
+					}
 				} else if(b.enPassantFlag == toIndex) {
 					insertMoveList(ml, createSpecialMove(fromIndex, toIndex, 0, b.enPassantFlag, 0));
 				}
@@ -1365,7 +1439,7 @@ int scorePosition(Board* b) {
 }
 
 Move inputPlayerMove(MoveList *ml) {
-	char inp[5];
+	char inp[6];
 	Move m;
 	while(TRUE) {
 		printf("Enter a move (e.g.");
@@ -1376,7 +1450,10 @@ Move inputPlayerMove(MoveList *ml) {
 		// printf("test\n");
 		// outputMove(&m);
 		for(int i=0; i<ml->used; i++) {
-			if((m.to == (ml->list[i]).to) && (m.from == (ml->list[i]).from)) {
+			// We need to check promotion as this distinguishes promotions to
+			// different pieces. Castling and e.p. are fully determined by from
+			// and to, so we can ignore: the move in ml will have right flags set
+			if((m.to == (ml->list[i]).to) && (m.from == (ml->list[i]).from) && (m.promotion == (ml->list[i].promotion))) {
 				return ml->list[i];
 			}
 		}
@@ -1440,9 +1517,9 @@ int twoPlayerGame() {
 	result = scorePosition(&b);
 	switch(result) {
 		case WHITE_WIN:
-			printf("White won!"); break;
+			printf("White won by checkmate!"); break;
 		case BLACK_WIN:
-			printf("Black won!"); break;
+			printf("Black won by checkmate!"); break;
 		case STALEMATE:
 			printf("Draw by stalemate."); break;
 		case REPITION:
