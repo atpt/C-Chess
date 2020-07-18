@@ -21,6 +21,9 @@
 #define B_KSIDE_CASTLE 4
 #define B_QSIDE_CASTLE 8
 #define FULL_CASTLING_RIGHTS (W_KSIDE_CASTLE | W_QSIDE_CASTLE | B_KSIDE_CASTLE | B_QSIDE_CASTLE)
+#define NON_FORCING 0
+#define CAPTURE 1
+#define CHECK 2
 // The following refer to the REPRESENTATION of the board
 // Lookup 'mailbox representation' for details
 #define BOARD_WIDTH 	10
@@ -136,8 +139,9 @@ int* BISHOP_MOVES;
 int* ROOK_MOVES;
 int* QUEEN_MOVES;
 int* KING_MOVES;
-//Piece value array
-int* PIECE_VALUES;
+//Piece value arrays
+int PIECE_VALUES[14];
+int PIECE_SQUARE_VALUES[14][BOARD_SIZE];
 
 typedef struct {
 	int from;
@@ -155,6 +159,7 @@ typedef struct {
 	// If e.p. is possible, holds DESTINATION square of possible e.p. capture
 	int enPassantFlag;
 	int player; 					// WHITE/BLACK
+	int forcingFlag;
 } Board;
 
 // Dynamically expanding array of Moves; for generation and AI
@@ -172,31 +177,41 @@ typedef struct {
 } BoardStack;
 
 // Forward declare everything so we don't have to worry about order of defns
-Board createBoard(int*, int, int, int);
-Board startingPosition();
-Move createMove(int, int);
-Move createSpecialMove(int, int, int, int, int);
-Board makeMove(Board, Move);
-void makeMoveInPlace(Board*, Move);
-void testBoard();
-void testPerft();
+// Format conversion. If void return, output goes to first arg pointer.
+void boardToArray(int*, Board*);
 char pieceToChar(int);
 int charToPiece(char);
 char indexToRankChar(int);
 int indexToRank(int);
-void outputBoard(Board*);
-int changePlayer(Board*);
+int indexToFile(int);
 void indexToAlgebraic(char*, int);
 int algebraicToIndex(char*);
-void printAlgebraic(int);
 char rankNumToChar(int);
 char fileNumToChar(int);
-void boardToArray(int*, Board*);
-void setupPosition(int*, Board*);
+void moveToString(char*, Move*);
+// Simple boolean tests
 int outOfBounds(int);
-void generateMoves(MoveList*, Board*);
-void generateWhiteMoves(MoveList*, Board);
-void generateBlackMoves(MoveList*, Board);
+int edgeOfBoard(int);
+int centreOfBoard(int);
+int largeCentreOfBoard(int);
+int isWhitePiece(int);
+int isBlackPiece(int);
+int isPiece(int);
+// Important properties of Boards, boolean unless specified
+int attackedByBlack(Board*, int);
+int attackedByWhite(Board*, int);
+int blackInCheck(Board*);
+int whiteInCheck(Board*);
+int samePosition(Board*, Board*);
+int detectThreefold(BoardStack);
+int detectInsufficientMaterial(Board*);
+int scorePosition(Board*); // NOT boolean
+// Output
+void outputBoard(Board*);
+void outputMove(Move*);
+void outputMoveList(MoveList*);
+void printAlgebraic(int);
+// Manage dynamic lists
 void initMoveList(MoveList*, int);
 void insertMoveList(MoveList*, Move);
 void insertMoveListReference(MoveList*, Move*);
@@ -208,27 +223,38 @@ void pushBoardStackReference(BoardStack*, Board*);
 Board* atIndexBoardStack(BoardStack*, int);
 Board popBoardStack(BoardStack*);
 void freeBoardStack(BoardStack*);
-void moveToString(char*, Move*);
-void outputMove(Move*);
-void outputMoveList(MoveList*);
+// Create or modify a Board
+Board createBoard(int*, int, int, int);
+Board startingPosition();
+Board makeMove(Board, Move);
+void makeMoveInPlace(Board*, Move);
+void setupPosition(int*, Board*);
+int changePlayer(Board*);
+// Create or modify a Move
+Move createMove(int, int);
+Move createSpecialMove(int, int, int, int, int);
+Move createMoveFromAlgebraic(char*);
+// Create or modify a MoveList
+void generateMoves(MoveList*, Board*);
+void generateWhiteMoves(MoveList*, Board);
+void generateBlackMoves(MoveList*, Board);
+// AI and search
+long perft(Board,int);
+int heuristicEval(Board*);
+int minimax(Board,int,int,int);
+int evaluateMove(Board*, Move, int);
+Move ai(Board*, int, int);
+// User input
+Move inputPlayerMove(MoveList*);
+// Games and tests called by main()
+void testBoard();
+void testPerft();
+int twoPlayerGame();
+int onePlayerGame(int, int, int);
+int zeroPlayerGame(int, int, int, int);
+// Setup/cleanup
 void initGlobalArrays();
 void freeGlobalArrays();
-int isWhitePiece(int);
-int isBlackPiece(int);
-int isPiece(int);
-int attackedByBlack(Board*, int);
-int attackedByWhite(Board*, int);
-long perft(Board,int);
-int twoPlayerGame();
-Move inputPlayerMove(MoveList*);
-Move createMoveFromAlgebraic(char*);
-int scorePosition(Board*);
-int blackInCheck(Board*);
-int whiteInCheck(Board*);
-int heuristicEval(Board*);
-int negamax(Board b, int depth);
-int evaluateMove(Board* b, Move m, int depth);
-Move ai(Board*, int, int);
 
 void initGlobalArrays() {
 
@@ -276,7 +302,7 @@ void initGlobalArrays() {
 	KING_MOVES[6] = 1;
 	KING_MOVES[7] = -1;
 
-	PIECE_VALUES = malloc(14 * sizeof(int));
+	// PIECE_VALUES = int[14];
 	PIECE_VALUES[OOB] 			= 0;
 	PIECE_VALUES[EMPTY] 		= 0;
 	PIECE_VALUES[W_PAWN] 		= 100;
@@ -292,17 +318,71 @@ void initGlobalArrays() {
 	PIECE_VALUES[W_KING]		= 0;
 	PIECE_VALUES[B_KING]		= 0;
 
+	// PIECE_SQUARE_VALUES = malloc(14 * sizeof(int));
+	// int i, square;
+	// for(i=0; i<14; i++) {
+	// 	PIECE_SQUARE_VALUES[i] = malloc(BOARD_SIZE * sizeof(int));
+	// }
+
+	int i, square;
+	for(i=0; i<14; i++) {
+		for(square=0; square<BOARD_SIZE; square++) {
+			PIECE_SQUARE_VALUES[i][square] = 0;
+		}
+	}
+
+	for(square=BOARD_TOP_LEFT; square<=BOARD_BOTTOM_RIGHT; square++) {
+		if(centreOfBoard(square)) {
+			// Pawns best occupying centre
+			PIECE_SQUARE_VALUES[W_PAWN][square] = 20;
+			PIECE_SQUARE_VALUES[B_PAWN][square] = -20;
+		} else if(largeCentreOfBoard(square)) {
+			PIECE_SQUARE_VALUES[W_KNIGHT][square] = 10;
+			PIECE_SQUARE_VALUES[B_KNIGHT][square] = -10;
+			// Optimal squares for knights
+			if(indexToRank(square) == 6) {
+				PIECE_SQUARE_VALUES[W_KNIGHT][square] = 30;
+			} else if(indexToRank(square) == 3) {
+				PIECE_SQUARE_VALUES[B_KNIGHT][square] = -30;
+			}
+		} else if(edgeOfBoard(square)) {
+			// Knight on the rim is dim
+			PIECE_SQUARE_VALUES[W_KNIGHT][square] = -10;
+			PIECE_SQUARE_VALUES[B_KNIGHT][square] = 10;
+			PIECE_SQUARE_VALUES[W_BISHOP][square] = -5;
+			PIECE_SQUARE_VALUES[B_BISHOP][square] = 5;
+		}
+		// Pawns gain value on 6th/7th ranks
+		if(indexToRank(square) == 6) {
+			PIECE_SQUARE_VALUES[W_PAWN][square] = 50;
+		} else if(indexToRank(square) == 7) {
+			PIECE_SQUARE_VALUES[W_PAWN][square] = 150;
+			PIECE_SQUARE_VALUES[B_PAWN][square] = 1;
+		} else if(indexToRank(square) == 3) {
+			PIECE_SQUARE_VALUES[B_PAWN][square] = -50;;
+		} else if(indexToRank(square) == 2) {
+			PIECE_SQUARE_VALUES[B_PAWN][square] = -150;
+			PIECE_SQUARE_VALUES[W_PAWN][square] = -1;
+		}
+	}
+	// Small incentive for AI to castle. TODO: proper King safety eval
+	PIECE_SQUARE_VALUES[W_KING][G1] = 5;
+	PIECE_SQUARE_VALUES[W_KING][C1] = 3;
+	PIECE_SQUARE_VALUES[W_KING][B1] = 5;
+	PIECE_SQUARE_VALUES[B_KING][G8] = -5;
+	PIECE_SQUARE_VALUES[B_KING][C8] = -3;
+	PIECE_SQUARE_VALUES[B_KING][B8] = -5;
+
 }
 
 void freeGlobalArrays() {
-
 	free(KNIGHT_MOVES);
 	free(BISHOP_MOVES);
 	free(ROOK_MOVES);
 	free(QUEEN_MOVES);
 	free(KING_MOVES);
-
 	free(PIECE_VALUES);
+	free(PIECE_SQUARE_VALUES);
 }
 
 // Assign some memory for ml
@@ -523,12 +603,30 @@ int indexToRank(int ind) {
 	return (8 + BOARD_TOP_PADDING) - (ind / BOARD_WIDTH);
 }
 
+int indexToFile(int ind) {
+	return ((ind % (BOARD_WIDTH)) - BOARD_LEFT_PADDING) + 1;
+}
+
 char fileNumToChar(int f) {
 	return 'a' + f - BOARD_LEFT_PADDING;
 }
 
 char rankNumToChar(int r) {
 	return '0' + r;
+}
+
+int edgeOfBoard(int index) {
+	return (indexToRank(index) == 1) || (indexToRank(index) == 8) || (indexToFile(index) == 1) || (indexToFile(index) == 8);
+}
+
+// In middle 4 squares?
+int centreOfBoard(int index) {
+	return (index==D4) || (index==E4) || (index==D5) || (index==E5);
+}
+
+// In middle 16 squares
+int largeCentreOfBoard(int index) {
+	return (indexToFile(index) >= 3) && (indexToFile(index) <= 6) && (indexToRank(index) >= 3) && (indexToRank(index) <= 6);
 }
 
 // Make board index ind into notation like "a1"; put string into s
@@ -573,6 +671,22 @@ void outputMove(Move* m) {
 	char s[4];
 	moveToString(s, m);
 	printf("%c%c%c%c", s[0], s[1], s[2], s[3]);
+}
+
+void outputResult(int result) {
+	printf("GAMEOVER!\nRESULT: ");
+	switch(result) {
+		case WHITE_WIN:
+			printf("White won by checkmate!\n"); break;
+		case BLACK_WIN:
+			printf("Black won by checkmate!\n"); break;
+		case STALEMATE:
+			printf("Draw by stalemate.\n"); break;
+		case THREEFOLD:
+			printf("Draw by threefold repetition.\n"); break;
+		case FIFTY_MOVE:
+			printf("Draw by fifty move rule.\n"); break;
+	}
 }
 
 Move createMoveFromAlgebraic(char* s) {
@@ -762,12 +876,12 @@ Move createSpecialMove(int from, int to, int castling, int enPassant, int promot
 // Return a new board with the position of b after move m is made.
 // Does not check the legality of the move; this is done by caller.
 Board makeMove(Board b, Move m) {
-	// // Output move, for debugging
-	// printf("Moving: ");
-	// printAlgebraic(m.from);
-	// printf(", ");
-	// printAlgebraic(m.to);
-	// printf("\n");
+	int captured = b.square[m.to];
+	if(captured == EMPTY) {
+		b.forcingFlag = NON_FORCING;
+	} else {
+		b.forcingFlag = CAPTURE;
+	}
 	b.square[m.to] = b.square[m.from];	// Put piece in new square
 	b.square[m.from] = EMPTY;						// ...and clear old square
 	if(m.promotion != 0) {
@@ -1180,7 +1294,6 @@ void generateWhiteMoves(MoveList* output, Board b) {
 				break;
 		}
 	}
-	// outputMoveList(ml); // For debugging
 	// Remove moves would put us in check
 	removals = malloc((ml->used) * sizeof(int));
 	for(i=0; i<(ml->used); i++) {
@@ -1189,7 +1302,6 @@ void generateWhiteMoves(MoveList* output, Board b) {
 		// King moves change kingPosition
 		kingPosition = (b.square[m.from] == W_KING) ? m.to : oldKingPosition;
 		tempBoard = makeMove(b, m);
-		// outputBoard(&tempBoard); // For debugging
 		if(attackedByBlack(&tempBoard, kingPosition)) {
 			removals[i] = TRUE;
 			removalCount++;
@@ -1201,8 +1313,8 @@ void generateWhiteMoves(MoveList* output, Board b) {
 			insertMoveList(output, atIndexMoveList(ml, i));
 		}
 	}
+	free(removals);
 	freeMoveList(ml);
-	// outputMoveList(output); // For debugging
 }
 
 void generateBlackMoves(MoveList* outputList, Board b) {
@@ -1371,10 +1483,8 @@ void generateBlackMoves(MoveList* outputList, Board b) {
 					insertMoveList(ml, createSpecialMove(E8, C8, B_QSIDE_CASTLE, 0, 0));
 				}
 				break;
-
 		}
 	}
-	// outputMoveList(ml); // For debugging
 	// Remove moves would put us in check
 	removals = malloc((ml->used) * sizeof(int));
 	for(i=0; i<(ml->used); i++) {
@@ -1383,7 +1493,6 @@ void generateBlackMoves(MoveList* outputList, Board b) {
 
 		kingPosition = (b.square[m.from] == B_KING) ? m.to : oldKingPosition;
 		tempBoard = makeMove(b, m);
-		// outputBoard(&tempBoard); // For debugging
 		if(attackedByWhite(&tempBoard, kingPosition)) {
 			removals[i] = TRUE;
 			removalCount++;
@@ -1395,8 +1504,8 @@ void generateBlackMoves(MoveList* outputList, Board b) {
 			insertMoveList(outputList, atIndexMoveList(ml, i));
 		}
 	}
+	free(removals);
 	freeMoveList(ml);
-	// outputMoveList(outputList); // For debugging
 }
 
 void generateMoves(MoveList* ml, Board* b) {
@@ -1410,8 +1519,6 @@ void generateMoves(MoveList* ml, Board* b) {
 
 // Count all legal move sequences of length <= depth, from position b
 long perft(Board b, int depth) {
-	// printf("Depth: %d\n", depth);
-	// outputBoard(&b);
 	if(depth == 0) {
 		return 1;
 	} else {
@@ -1475,6 +1582,26 @@ int detectThreefold(BoardStack gameHistory) {
 	return FALSE;
 }
 
+int detectInsufficientMaterial(Board* b) {
+	int* pieceCounts = malloc(14*sizeof(int));
+	int i;
+	for(i=0;i<14;i++) {
+		pieceCounts[i] = 0;
+	}
+	for(i=BOARD_TOP_LEFT; i<=BOARD_BOTTOM_RIGHT; i++) {
+		pieceCounts[b->square[i]]++;
+	}
+	// Any of these is enough to checkmate
+	if((pieceCounts[W_QUEEN] > 0) || (pieceCounts[B_QUEEN] > 0) || (pieceCounts[W_ROOK] > 0) || (pieceCounts[B_ROOK] > 0) || (pieceCounts[W_PAWN] > 0) || (pieceCounts[B_PAWN] > 0) || (pieceCounts[W_BISHOP] > 1) || (pieceCounts[B_BISHOP] > 1) || (pieceCounts[W_KNIGHT] > 2) || (pieceCounts[B_KNIGHT] > 2)) {
+		return FALSE;
+	}
+	if(((pieceCounts[W_BISHOP] > 0) && (pieceCounts[W_KNIGHT] > 0)) || ((pieceCounts[B_BISHOP] > 0) && (pieceCounts[B_KNIGHT] > 0))) {
+		return FALSE;
+	}
+	// TODO: add KB vs. KB with check for opposite colours
+	return TRUE;
+}
+
 // Assess the result of a game
 int scorePosition(Board* b) {
 	MoveList moves;
@@ -1520,11 +1647,12 @@ int heuristicEval(Board* b) {
 	score = 0;
 	for(i=BOARD_TOP_LEFT; i<=BOARD_BOTTOM_RIGHT; i++) {
 		score += PIECE_VALUES[b->square[i]];
+		score += PIECE_SQUARE_VALUES[b->square[i]][i];
 	}
 	return score;
 }
 
-int negamax(Board b, int depth) {
+int minimax(Board b, int depth, int alpha, int beta) {
 	// if(depth > 1) {
 	// 	printf("\nNegamax called with depth %d and position:\n", depth);
 	// 	outputBoard(&b);
@@ -1536,6 +1664,7 @@ int negamax(Board b, int depth) {
 	generateMoves(&ml, &b);
 	int numMoves = ml.used;
 	if(ml.used == 0) {
+		freeMoveList(&ml);
 		switch(scorePosition(&b)) {
 			case WHITE_WIN:
 				// printf("Returning 10000 (checkmate)");
@@ -1548,37 +1677,45 @@ int negamax(Board b, int depth) {
 				return 0;
 		}
 	}
-	int *scores = malloc(numMoves * sizeof(int));
-	int bestScore;
+	// int *scores = malloc(numMoves * sizeof(int));
+	int bestScore, eval;
+	Board newPos;
 	// int bestIndex = 0;
 	if(b.player == WHITE) {
 		// Maximising player
 		bestScore = INT_MIN;
 		for(int i=0; i<numMoves; i++) {
-			scores[i] = negamax(makeMove(b, ml.list[i]), depth - 1);
-			if(scores[i] > bestScore) {
-				bestScore = scores[i];
-				if(bestScore >= 10000) {
-					return bestScore;
-				}
-				// bestIndex = i;
+			newPos = makeMove(b, ml.list[i]);
+			if((newPos.forcingFlag == NON_FORCING) || (depth > 1)) {
+				eval = minimax(newPos, depth - 1, alpha, beta);
+			} else {
+				eval = minimax(newPos, depth, alpha, beta);
+			}
+			bestScore = (bestScore > eval) ? bestScore : eval;
+			alpha = (alpha > bestScore) ? alpha : bestScore;
+			if(alpha >= beta) {
+				break;
 			}
 		}
 	} else {
 		// Minimising player
 		bestScore = INT_MAX;
 		for(int i=0; i<numMoves; i++) {
-			scores[i] = negamax(makeMove(b, ml.list[i]), depth - 1);
-			if(scores[i] < bestScore) {
-				bestScore = scores[i];
-				if(bestScore <= -10000) {
-					return bestScore;
-				}
-				// bestIndex = i;
+			newPos = makeMove(b, ml.list[i]);
+			if((newPos.forcingFlag == NON_FORCING) || (depth > 1)) {
+				eval = minimax(newPos, depth - 1, alpha, beta);
+			} else {
+				eval = minimax(newPos, depth, alpha, beta);
+			}
+			bestScore = (bestScore < eval) ? bestScore : eval;
+			beta = (beta < bestScore) ? beta : bestScore;
+			if(beta <= alpha) {
+				break;
 			}
 		}
 	}
 	// printf("Returning: %d", bestScore);
+	freeMoveList(&ml);
 	return bestScore;
 }
 
@@ -1587,14 +1724,15 @@ int evaluateMove(Board* b, Move m, int depth) {
 	// outputMove(&m);
 	// printf("\n");
 	Board after = makeMove(*b, m);
-	return negamax(after, depth);
+	return minimax(after, depth, INT_MIN, INT_MAX);
 }
 
 Move ai(Board* b, int depth, int verbose) {
-	if(verbose) {
-		outputBoard(b);
-	}
+	// if(verbose) {
+	// 	outputBoard(b);
+	// }
 	MoveList ml;
+	Move returnMove;
 	generateMoves(&ml, b);
 	int numMoves = ml.used;
 	if(ml.used == 0) {
@@ -1610,7 +1748,7 @@ Move ai(Board* b, int depth, int verbose) {
 		for(int i=0; i<numMoves; i++) {
 			scores[i] = evaluateMove(b, ml.list[i], depth);
 			if(verbose == TRUE) {
-				printf("\nFinal score for move: ");
+				// printf("\nFinal score for move: ");
 				outputMove(&ml.list[i]);
 				printf(": %d\n", scores[i]);
 			}
@@ -1625,7 +1763,7 @@ Move ai(Board* b, int depth, int verbose) {
 		for(int i=0; i<numMoves; i++) {
 			scores[i] = evaluateMove(b, ml.list[i], depth);
 			if(verbose == TRUE) {
-				printf("\nFinal score for move: ");
+				// printf("\nFinal score for move: ");
 				outputMove(&ml.list[i]);
 				printf(": %d\n", scores[i]);
 			}
@@ -1635,7 +1773,14 @@ Move ai(Board* b, int depth, int verbose) {
 			}
 		}
 	}
-	return ml.list[bestIndex];
+	returnMove = ml.list[bestIndex];
+	if(verbose == TRUE) {
+		printf("Best move: ");
+		outputMove(&ml.list[bestIndex]);
+		printf(" (%d)\n", bestScore);
+	}
+	freeMoveList(&ml);
+	return returnMove;
 }
 
 void testBoard() {
@@ -1679,37 +1824,35 @@ void testPerft() {
 
 int twoPlayerGame() {
 	Board b = startingPosition();
+	BoardStack bs;
+	initBoardStack(&bs, 40);
 	Move playerMove;
 	MoveList legalMoves;
-	int result;
+	int result = 0;
 	while(TRUE) {
+		pushBoardStack(&bs, b);
 		outputBoard(&b);
+		freeMoveList(&legalMoves);
 		generateMoves(&legalMoves, &b);
 		if(legalMoves.used == 0) {
-			printf("GAMEOVER\n"); break;
+			break;
+		}
+		if(detectThreefold(bs) || detectInsufficientMaterial(&b)) {
+			result = THREEFOLD;
+			break;
 		}
 		playerMove = inputPlayerMove(&legalMoves);
 		b = makeMove(b, playerMove);
 	}
-	printf("RESULT: ");
-	result = scorePosition(&b);
-	switch(result) {
-		case WHITE_WIN:
-			printf("White won by checkmate!"); break;
-		case BLACK_WIN:
-			printf("Black won by checkmate!"); break;
-		case STALEMATE:
-			printf("Draw by stalemate."); break;
-		case THREEFOLD:
-			printf("Draw by threefold repetition."); break;
-		case FIFTY_MOVE:
-			printf("Draw by fifty move rule."); break;
+	if(result == 0) {
+		result = scorePosition(&b);
 	}
-	printf("\n");
+	outputResult(result);
+	freeMoveList(&legalMoves);
 	return result;
 }
 
-int onePlayerGame(int colour, int depth) {
+int onePlayerGame(int colour, int depth, int verbose) {
 	Board b = startingPosition();
 	BoardStack bs;
 	initBoardStack(&bs, 40);
@@ -1720,48 +1863,91 @@ int onePlayerGame(int colour, int depth) {
 	while(TRUE) {
 		pushBoardStack(&bs, b);
 		outputBoard(&b);
+		int i, p;
+		freeMoveList(&legalMoves);
 		generateMoves(&legalMoves, &b);
 		if(legalMoves.used == 0) {
 			break;
 		}
-		if(detectThreefold(bs)) {
+		if(detectThreefold(bs) || detectInsufficientMaterial(&b)) {
 			result = THREEFOLD;
 			break;
 		}
 		if(b.player == colour) {
 			playerMove = inputPlayerMove(&legalMoves);
 		} else {
-			playerMove = ai(&b, depth, FALSE);
+			printf("Thinking...\n");
+			playerMove = ai(&b, depth, verbose);
 			printf("Computer moves: ");
 			outputMove(&playerMove);
 			printf("\n");
 		}
 		b = makeMove(b, playerMove);
 	}
-	printf("GAMEOVER!\nRESULT: ");
 	if(result == 0) {
 		result = scorePosition(&b);
 	}
-	switch(result) {
-		case WHITE_WIN:
-			printf("White won by checkmate!"); break;
-		case BLACK_WIN:
-			printf("Black won by checkmate!"); break;
-		case STALEMATE:
-			printf("Draw by stalemate."); break;
-		case THREEFOLD:
-			printf("Draw by threefold repetition."); break;
-		case FIFTY_MOVE:
-			printf("Draw by fifty move rule."); break;
-	}
-	printf("\n");
+	outputResult(result);
+	freeMoveList(&legalMoves);
 	return result;
 }
 
+int zeroPlayerGame(int depth, int maxPly, int verbose, int silent) {
+	Board b = startingPosition();
+	BoardStack bs;
+	initBoardStack(&bs, 40);
 
+	Move playerMove;
+	MoveList legalMoves;
+	int result = 0;
+	int ply = 0;
+	while(TRUE) {
+		ply++;
+		if(ply >= maxPly) {
+			printf("Maximum turns reached\n");
+			return FIFTY_MOVE;
+		}
+		pushBoardStack(&bs, b);
+		if(!silent) {
+ 			outputBoard(&b);
+		}
+		int i, p;
+		freeMoveList(&legalMoves);
+		generateMoves(&legalMoves, &b);
+		if(legalMoves.used == 0) {
+			break;
+		}
+		if(detectThreefold(bs) || detectInsufficientMaterial(&b)) {
+			result = THREEFOLD;
+			break;
+		}
+		if(b.player == WHITE) {
+			playerMove = ai(&b, depth, verbose);
+			if(!silent) {
+				outputMove(&playerMove);
+				printf("\n");
+			}
+		} else {
+			playerMove = ai(&b, depth, verbose);
+			if(!silent) {
+				outputMove(&playerMove);
+				printf("\n");
+			}
+		}
+		b = makeMove(b, playerMove);
+	}
+	if(result == 0) {
+		result = scorePosition(&b);
+	}
+	if(!silent) {
+		outputResult(result);
+	}
+	freeMoveList(&legalMoves);
+	return result;
+}
 
 void testAI() {
-	int depth = 2;
+	int depth = 3;
 	Board pos = startingPosition();
 	pos = makeMove(pos, createMove(E2, E4));
 	pos = makeMove(pos, createMove(E7, E5));
@@ -1781,11 +1967,17 @@ void testAI() {
 
 int main() {
 	initGlobalArrays();
+	int i;
+	// for(i=0;i<BOARD_SIZE;i++) {
+	// 	printf("%d = %d\n", i, PIECE_SQUARE_VALUES[B_KNIGHT][i]);
+	// }
 	// testBoard();
 	// testPerft();
 	// twoPlayerGame();
 	// testAI();
-	onePlayerGame(WHITE, 3);
+	int result = zeroPlayerGame(2, 500, TRUE, FALSE);
+	printf("%d\n", result);
+	// onePlayerGame(WHITE, 3, TRUE);
 	freeGlobalArrays();
 	return 0;
 }
