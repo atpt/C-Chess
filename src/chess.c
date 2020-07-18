@@ -241,9 +241,9 @@ void generateBlackMoves(MoveList*, Board);
 // AI and search
 long perft(Board,int);
 int heuristicEval(Board*);
-int minimax(Board,int,int,int);
-int evaluateMove(Board*, Move, int);
-Move ai(Board*, int, int);
+int minimax(Board,int,int,int,int,int*);
+int evaluateMove(Board*, Move, int, int);
+Move minimaxAI(Board*, int, int, int);
 // User input
 Move inputPlayerMove(MoveList*);
 // Games and tests called by main()
@@ -251,7 +251,7 @@ void testBoard();
 void testPerft();
 int twoPlayerGame();
 int onePlayerGame(int, int, int);
-int zeroPlayerGame(int, int, int, int);
+int zeroPlayerGame(int, int, int, int, int, int, int);
 // Setup/cleanup
 void initGlobalArrays();
 void freeGlobalArrays();
@@ -381,8 +381,8 @@ void freeGlobalArrays() {
 	free(ROOK_MOVES);
 	free(QUEEN_MOVES);
 	free(KING_MOVES);
-	free(PIECE_VALUES);
-	free(PIECE_SQUARE_VALUES);
+	// free(PIECE_VALUES);
+	// free(PIECE_SQUARE_VALUES);
 }
 
 // Assign some memory for ml
@@ -1652,11 +1652,16 @@ int heuristicEval(Board* b) {
 	return score;
 }
 
-int minimax(Board b, int depth, int alpha, int beta) {
+int minimax(Board b, int depth, int alpha, int beta, int extensions, int* nodeCount) {
 	// if(depth > 1) {
 	// 	printf("\nNegamax called with depth %d and position:\n", depth);
 	// 	outputBoard(&b);
 	// }
+
+	*nodeCount = (*nodeCount) + 1;
+	if((*nodeCount % 1000000) == 999999) {
+		printf("Nodecount: %d\n", *nodeCount);
+	}
 	if(depth == 0) {
 		return heuristicEval(&b);
 	}
@@ -1686,10 +1691,12 @@ int minimax(Board b, int depth, int alpha, int beta) {
 		bestScore = INT_MIN;
 		for(int i=0; i<numMoves; i++) {
 			newPos = makeMove(b, ml.list[i]);
-			if((newPos.forcingFlag == NON_FORCING) || (depth > 1)) {
-				eval = minimax(newPos, depth - 1, alpha, beta);
+			if((newPos.forcingFlag == NON_FORCING) || (depth > 1) || (extensions == 0)) {
+				eval = minimax(newPos, depth - 1, alpha, beta, 0, nodeCount);
 			} else {
-				eval = minimax(newPos, depth, alpha, beta);
+				// outputMove(&ml.list[i]);
+				// printf("\n");
+				eval = minimax(newPos, depth, alpha, beta, extensions - 1, nodeCount);
 			}
 			bestScore = (bestScore > eval) ? bestScore : eval;
 			alpha = (alpha > bestScore) ? alpha : bestScore;
@@ -1702,10 +1709,10 @@ int minimax(Board b, int depth, int alpha, int beta) {
 		bestScore = INT_MAX;
 		for(int i=0; i<numMoves; i++) {
 			newPos = makeMove(b, ml.list[i]);
-			if((newPos.forcingFlag == NON_FORCING) || (depth > 1)) {
-				eval = minimax(newPos, depth - 1, alpha, beta);
+			if((newPos.forcingFlag == NON_FORCING) || (depth > 1) || (extensions == 0)) {
+				eval = minimax(newPos, depth - 1, alpha, beta, extensions, nodeCount);
 			} else {
-				eval = minimax(newPos, depth, alpha, beta);
+				eval = minimax(newPos, depth, alpha, beta, extensions - 1, nodeCount);
 			}
 			bestScore = (bestScore < eval) ? bestScore : eval;
 			beta = (beta < bestScore) ? beta : bestScore;
@@ -1719,15 +1726,17 @@ int minimax(Board b, int depth, int alpha, int beta) {
 	return bestScore;
 }
 
-int evaluateMove(Board* b, Move m, int depth) {
+int evaluateMove(Board* b, Move m, int depth, int maxExtensions) {
 	// printf("\nEvaluating: ");
 	// outputMove(&m);
 	// printf("\n");
 	Board after = makeMove(*b, m);
-	return minimax(after, depth, INT_MIN, INT_MAX);
+	int nodes = 0;
+	int* nodeCount = &nodes;
+	return minimax(after, depth, INT_MIN, INT_MAX, maxExtensions, nodeCount);
 }
 
-Move ai(Board* b, int depth, int verbose) {
+Move minimaxAI(Board* b, int depth, int maxExtensions, int verbose) {
 	// if(verbose) {
 	// 	outputBoard(b);
 	// }
@@ -1746,7 +1755,7 @@ Move ai(Board* b, int depth, int verbose) {
 		// Maximising player
 		bestScore = INT_MIN;
 		for(int i=0; i<numMoves; i++) {
-			scores[i] = evaluateMove(b, ml.list[i], depth);
+			scores[i] = evaluateMove(b, ml.list[i], depth, maxExtensions);
 			if(verbose == TRUE) {
 				// printf("\nFinal score for move: ");
 				outputMove(&ml.list[i]);
@@ -1761,7 +1770,7 @@ Move ai(Board* b, int depth, int verbose) {
 		// Minimising player
 		bestScore = INT_MAX;
 		for(int i=0; i<numMoves; i++) {
-			scores[i] = evaluateMove(b, ml.list[i], depth);
+			scores[i] = evaluateMove(b, ml.list[i], depth, maxExtensions);
 			if(verbose == TRUE) {
 				// printf("\nFinal score for move: ");
 				outputMove(&ml.list[i]);
@@ -1877,7 +1886,7 @@ int onePlayerGame(int colour, int depth, int verbose) {
 			playerMove = inputPlayerMove(&legalMoves);
 		} else {
 			printf("Thinking...\n");
-			playerMove = ai(&b, depth, verbose);
+			playerMove = minimaxAI(&b, depth, 10, verbose);
 			printf("Computer moves: ");
 			outputMove(&playerMove);
 			printf("\n");
@@ -1892,7 +1901,7 @@ int onePlayerGame(int colour, int depth, int verbose) {
 	return result;
 }
 
-int zeroPlayerGame(int depth, int maxPly, int verbose, int silent) {
+int zeroPlayerGame(int depth1, int maxExtensions1, int depth2, int maxExtensions2, int maxPly, int verbose, int silent) {
 	Board b = startingPosition();
 	BoardStack bs;
 	initBoardStack(&bs, 40);
@@ -1922,13 +1931,13 @@ int zeroPlayerGame(int depth, int maxPly, int verbose, int silent) {
 			break;
 		}
 		if(b.player == WHITE) {
-			playerMove = ai(&b, depth, verbose);
+			playerMove = minimaxAI(&b, depth1, maxExtensions1, verbose);
 			if(!silent) {
 				outputMove(&playerMove);
 				printf("\n");
 			}
 		} else {
-			playerMove = ai(&b, depth, verbose);
+			playerMove = minimaxAI(&b, depth2, maxExtensions2, verbose);
 			if(!silent) {
 				outputMove(&playerMove);
 				printf("\n");
@@ -1959,7 +1968,7 @@ void testAI() {
 	pos = makeMove(pos, createMove(B8, C6));
 	// pos = makeMove(pos, createMove(D1, F3));
 	// pos = makeMove(pos, createMove(D8, E7));
-	Move m = ai(&pos, depth, TRUE);
+	Move m = minimaxAI(&pos, depth, 10, TRUE);
 	printf("Best move: ");
 	outputMove(&m);
 	printf("\n");
@@ -1975,7 +1984,8 @@ int main() {
 	// testPerft();
 	// twoPlayerGame();
 	// testAI();
-	int result = zeroPlayerGame(2, 500, TRUE, FALSE);
+	// int result = onePlayerGame(WHITE, 3, TRUE);
+	int result = zeroPlayerGame(4, 4, 3, 10, 500, FALSE, FALSE);
 	printf("%d\n", result);
 	// onePlayerGame(WHITE, 3, TRUE);
 	freeGlobalArrays();
