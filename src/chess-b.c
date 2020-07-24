@@ -4,6 +4,7 @@
 #import <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 
 // Fast base 2 log (for converting bitboard->int)
 #define LOG2(X) ((unsigned) (8*sizeof (unsigned long long) - __builtin_clzll((X)) - 1))
@@ -26,8 +27,20 @@
 #define RES_INSUFF_MATERIAL 7
 
 // Ai Modes
-#define NORMAL_AI 0
-#define DIRTY_AI 1
+#define NORMAL_AI 1
+#define DIRTY_AI 3
+#define IDS 2
+#define HUMAN 0
+
+// Nodes
+#define PV_NODE 0
+#define ALL_NODE 1
+#define CUT_NODE 2
+#define PV_NODE_CAPTURES 3
+#define ALL_NODE_CAPTURES 4
+#define CUT_NODE_CAPTURES 5
+#define EMPTY 6
+
 // Move flags
 #define FLAG_QUIET_MOVE					 0
 #define FLAG_PAWN_PUSH 					(1<<0)
@@ -310,6 +323,12 @@ int PIECE_SQUARE_VALUES[14][64];
 const int MOBILITY_FACTOR = 1;
 const int SAFETY_FACTOR = 2;
 
+// For hashing positions
+const int ZOBRIST_LENGTH = 781;
+unsigned int ZOBRIST_RANDOMS[ZOBRIST_LENGTH];
+
+const int HASH_TABLE_SIZE = 1<<16; // 65535
+
 typedef struct {
 	unsigned int plyCount : 15;
 	unsigned int castlingFlags : 4;
@@ -331,6 +350,7 @@ typedef struct {
 	signed int squareValueTotal;
 	signed int materialCount;
 	uint64_t squareAttacksBB[64];
+	unsigned int hash;
 	// unsigned char attackedBySide[128];
 } Position;
 
@@ -351,6 +371,25 @@ typedef struct {
 	int size;
 } MoveList;
 
+typedef struct {
+	unsigned int key;
+	Move move;
+	unsigned int depth;
+	int score;
+	unsigned int nodeType : 3;
+} HashTableEntry;
+
+// typedef struct {
+// 	int key;
+// 	HashTableEntry value;
+// 	struct List* next;
+// } List;
+
+typedef struct {
+	HashTableEntry* array;
+} HashTable;
+
+
 uint64_t getPieceBB(Position*, int);
 uint64_t getEmptyBB(Position*);
 uint64_t getOccupiedBB(Position*);
@@ -370,6 +409,10 @@ int attackedByBlack(Position*, uint64_t);
 uint64_t attackedByWhiteBitBoard(Position*, uint64_t);
 uint64_t attackedByBlackBitBoard(Position*, uint64_t);
 int popCount(uint64_t);
+void initZobristHash(Position*);
+int pieceOnSquare(Position*, int);
+void verifyHash(Position*, Move*,int);
+// void updateZobristHash(Position*, );
 
 void initGlobalArrays() {
 	SQUARE_BBS[A1_INT] = A1;
@@ -581,6 +624,15 @@ void initGlobalArrays() {
 	PIECE_SQUARE_VALUES[W_PAWN][D2_INT] = -20;
 	PIECE_SQUARE_VALUES[B_PAWN][D7_INT] = 20;
 
+	// Random Zobrist keys
+	time_t t;
+	srand((unsigned) time(&t));
+
+	for(i=0; i<ZOBRIST_LENGTH; i++) {
+		ZOBRIST_RANDOMS[i] = rand();
+		// printf("%d\n", ZOBRIST_RANDOMS[i]);
+	}
+
 }
 
 void freeGlobalArrays() {
@@ -732,6 +784,45 @@ void pushMoveList(MoveList* ml, int from, int to, int flags, int piece, int colo
 		}
 	}
 	ml->list[ml->used++] = m;
+}
+
+
+int calcHash(int hash32) {
+	return hash32 % HASH_TABLE_SIZE;
+}
+
+void initHashTable(HashTable* ht) {
+	ht->array = malloc(HASH_TABLE_SIZE * sizeof(HashTableEntry));
+	if(ht->array == NULL) {
+		printf("ERROR: MALLOC FAILED\n"); return;
+	}
+	int i;
+	HashTableEntry empty;
+	empty.nodeType = EMPTY;
+	for(i=0; i<HASH_TABLE_SIZE; i++) {
+		ht->array[i] = empty;
+	}
+}
+
+void addToHashTable(HashTable* ht, int key, Move m, int depth, int score, int nodeType) {
+	HashTableEntry e = ht->array[calcHash(key)];
+	if((e.nodeType = EMPTY) || (nodeType < e.nodeType) || (nodeType == e.nodeType && depth >= e.depth)) {
+		e.key = key;
+		e.move = m;
+		e.depth = depth;
+		e.score = score;
+		e.nodeType = nodeType;
+		ht->array[calcHash(key)] = e;
+	}
+}
+
+HashTableEntry* getFromHashTable(HashTable* ht, int key) {
+	return &ht->array[calcHash(key)];
+}
+
+
+void freeHashTable(HashTable* ht) {
+	free(ht->array);
 }
 
 int abs(int x) {
@@ -953,6 +1044,7 @@ void outputPosition(Position* p) {
 	printf("|a|b|c|d|e|f|g|h\n");
 	outputIrrFlag(p->flag);
 	printf("Material:%d Square vals:%d\n", p->materialCount, p->squareValueTotal);
+	printf("Zobrist hash: %d\n", p->hash);
 	// outputMeta(p);
 }
 
@@ -981,6 +1073,131 @@ void initialisePosition(Position* p) {
 		p->squareAttacksBB[i] = 0;
 		// p->attackedBySide[i] = 0;
 		// p->attackedBySide[i+64] = 0;
+	}
+}
+
+void updateZobristPieceMove(Position* p, int piece, int square) {
+	piece -= 2; // Get in range 0-11
+	// printf("HASH UPDATE. PIECE: %d, SQUARE: %d\n", piece, square);
+	p->hash ^= ZOBRIST_RANDOMS[(piece * 12) + square];
+}
+
+void updateZobristSideToMove(Position* p) {
+	// printf("HASH UPDATE. Side to move\n");
+	p->hash ^= ZOBRIST_RANDOMS[768];
+}
+
+void updateZobristWKCastle(Position* p) {
+	// printf("HASH UPDATE. WK\n");
+	p->hash ^= ZOBRIST_RANDOMS[769];
+}
+
+void updateZobristWQCastle(Position* p) {
+	// printf("HASH UPDATE. WQ\n");
+	p->hash ^= ZOBRIST_RANDOMS[770];
+}
+
+void updateZobristBKCastle(Position* p) {
+	// printf("HASH UPDATE. BK\n");
+	p->hash ^= ZOBRIST_RANDOMS[771];
+}
+
+void updateZobristBQCastle(Position* p) {
+	// printf("HASH UPDATE. WQ\n");
+	p->hash ^= ZOBRIST_RANDOMS[772];
+}
+
+void updateZobristCastlingFlag(Position* p, int flag) {
+	// printf("HASH UPDATE. Castling flags: %d\n", flag);
+	p->hash ^= ZOBRIST_RANDOMS[769] * (flag & 1);
+	flag >>= 1;
+	p->hash ^= ZOBRIST_RANDOMS[770] * (flag & 1);
+	flag >>= 1;
+	p->hash ^= ZOBRIST_RANDOMS[771] * (flag & 1);
+	flag >>= 1;
+	p->hash ^= ZOBRIST_RANDOMS[772] * (flag & 1);
+}
+
+void updateZobristEnPassantFlag(Position* p, int flag) {
+	if(flag == 0) return;
+	flag = flag % 8; // Get file
+	// printf("HASH UPDATE. En passant: %d\n", flag);
+	p->hash ^= ZOBRIST_RANDOMS[773+flag];
+}
+
+int calcZobristFromScratch(Position* p) {
+	// printf("CALCULATING FROM SCRATH\n");
+	int tempHash = p->hash;
+	int returnVal;
+
+	p->hash = 0;
+	int square, piece;
+	for(square=0; square<64; square++) {
+		piece = pieceOnSquare(p, square);
+		if(piece >= W_PAWN) {
+			updateZobristPieceMove(p, piece, square);
+		}
+	}
+	if(p->player == BLACK) {
+		updateZobristSideToMove(p);
+	}
+	updateZobristCastlingFlag(p, p->flag.castlingFlags);
+	if(p->flag.enPassantFlag) {
+		updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
+	}
+	returnVal = p->hash;
+
+	p->hash = tempHash;
+	// printf("FINISHED CALCULATING FROM SCRATH\n");
+	return returnVal;
+}
+
+int calcZobristFromScratchVerbose(Position* p) {
+	printf("CALCULATING FROM SCRATH (VERBOSE)\n");
+	int tempHash = p->hash;
+	int returnVal;
+
+	p->hash = 0;
+	int square, piece;
+	for(square=0; square<64; square++) {
+		piece = pieceOnSquare(p, square);
+		if(piece >= W_PAWN) {
+			updateZobristPieceMove(p, piece, square);
+			printf("Piece %d\n", p->hash);
+		}
+	}
+	if(p->player == BLACK) {
+		updateZobristSideToMove(p);
+		printf("Side to move %d\n", p->hash);
+	}
+	updateZobristCastlingFlag(p, p->flag.castlingFlags);
+	printf("Castling %d\n", p->hash);
+	if(p->flag.enPassantFlag) {
+		updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
+	}
+	printf("En passant %d\n", p->hash);
+	returnVal = p->hash;
+
+	p->hash = tempHash;
+	printf("FINISHED CALCULATING FROM SCRATH\n");
+	return returnVal;
+}
+
+void initZobristHash(Position* p) {
+	p->hash = 0;
+	int square, piece;
+	for(square=0; square<64; square++) {
+		piece = pieceOnSquare(p, square);
+		if(piece >= W_PAWN) {
+			updateZobristPieceMove(p, piece, square);
+		}
+	}
+	if(p->player == BLACK) {
+		updateZobristSideToMove(p);
+	}
+	updateZobristCastlingFlag(p, p->flag.castlingFlags);
+	if(p->flag.enPassantFlag) {
+		updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
 	}
 }
 
@@ -1157,6 +1374,8 @@ void setupStartPosition(Position* p) {
 	p->flag.plyCount = 0;
 	p->flag.castlingFlags = W_KSIDE_CASTLE | W_QSIDE_CASTLE | B_KSIDE_CASTLE | B_QSIDE_CASTLE;
 	p->flag.enPassantFlag = 0;
+
+	initZobristHash(p);
 }
 
 Move createMove(int from, int to, int flags, int piece, int colour, int cPiece, int cColour) {
@@ -1172,8 +1391,11 @@ Move createMove(int from, int to, int flags, int piece, int colour, int cPiece, 
 }
 
 void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
+	int oldCastlingFlags = p->flag.castlingFlags;
 	pushIrrFlagStack(fs, p);
 	p->player = !p->player;
+	updateZobristSideToMove(p);
+	updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
 	uint64_t fromBB = SQUARE_BBS[m->from];
 	uint64_t toBB = SQUARE_BBS[m->to];
 	uint64_t fromToBB = fromBB ^ toBB;
@@ -1190,7 +1412,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->squareAttacksBB[m->from] = 0;
 			p->squareAttacksBB[m->to] = pieceAttacks(p, m->piece, m->to);
-			// p->attackedBySide[(64*m->colour)+m->from]
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->piece, m->to);
 			break;
 		case FLAG_PAWN_PUSH:
 			p->pieceBB[m->piece] 		^= fromToBB;
@@ -1202,6 +1426,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->squareAttacksBB[m->from] = 0;
 			p->squareAttacksBB[m->to] = pieceAttacks(p, m->piece, m->to);
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->piece, m->to);
 			break;
 		case FLAG_DOUBLE_PAWN_PUSH:
 			p->pieceBB[m->piece] 		^= fromToBB;
@@ -1214,6 +1441,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->flag.enPassantFlag = m->to;
 			p->flag.plyCount = 0;
 			p->squareValueTotal += PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->piece, m->to);
 			break;
 		case FLAG_CAPTURES:
 			p->pieceBB[m->piece] 		^= fromToBB;
@@ -1228,6 +1458,10 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->flag.enPassantFlag = 0;
 			p->squareValueTotal += PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->materialCount -= PIECE_VALUES[m->cPiece];
+
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->piece, m->to);
 			break;
 		case FLAG_EP_CAPTURE:
 			// printf("%d\n", p->flag.enPassantFlag);
@@ -1248,7 +1482,13 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[p->flag.enPassantFlag] = 0;
 			p->squareAttacksBB[m->to] = pieceAttacks(p, m->piece, m->to);
 			p->flag.plyCount = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->cPiece, p->flag.enPassantFlag);
+			updateZobristPieceMove(p, m->piece, m->to);
+
 			p->flag.enPassantFlag = 0;
+
 			break;
 		case FLAG_KING_CASTLE:
 			specialBB = (toBB>>1) | (toBB<<1); // F1/8 | H1/8
@@ -1266,6 +1506,11 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->flag.enPassantFlag = 0;
 			p->squareValueTotal += PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->squareValueTotal += PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->from+1] - PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to+1];
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to+1);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->from+1);
 			break;
 		case FLAG_QUEEN_CASTLE:
 			specialBB = (toBB<<1) | (toBB>>2); // D1/8 | A1/8
@@ -1283,6 +1528,11 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->from-1] - PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to-2];
 			p->flag.plyCount++;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to-2);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->from-1);
 			break;
 		case FLAG_KNIGHT_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1295,6 +1545,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[W_KNIGHT+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->squareAttacksBB[m->from] = 0;
 			p->squareAttacksBB[m->to] = pieceAttacks(p, W_KNIGHT+(6*m->colour), m->to);
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, W_KNIGHT+(6*m->colour), m->to);
 			break;
 		case FLAG_BISHOP_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1307,6 +1560,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[W_BISHOP+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, W_BISHOP+(6*m->colour), m->to);
 			break;
 		case FLAG_ROOK_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1319,6 +1575,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to);
 			break;
 		case FLAG_QUEEN_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1331,6 +1590,9 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal += PIECE_SQUARE_VALUES[W_QUEEN+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, W_QUEEN+(6*m->colour), m->to);
 			break;
 		case FLAG_KNIGHT_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1346,6 +1608,10 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->materialCount += PIECE_VALUES[W_KNIGHT+(6*m->colour)] - PIECE_VALUES[m->piece];
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, W_KNIGHT+(6*m->colour), m->to);
 			break;
 		case FLAG_BISHOP_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1361,6 +1627,10 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->materialCount += PIECE_VALUES[W_BISHOP+(6*m->colour)] - PIECE_VALUES[m->piece];
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, W_BISHOP+(6*m->colour), m->to);
 			break;
 		case FLAG_ROOK_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1376,6 +1646,10 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->materialCount += PIECE_VALUES[W_ROOK+(6*m->colour)] - PIECE_VALUES[m->piece];
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to);
 			break;
 		case FLAG_QUEEN_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn disappears
@@ -1391,37 +1665,60 @@ void makeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->to] = pieceAttacks(p, W_QUEEN+(6*m->colour), m->to);
 			p->flag.plyCount = 0;
 			p->flag.enPassantFlag = 0;
+
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, W_QUEEN+(6*m->colour), m->to);
 			break;
 	}
 	// Test. (Need to consider every combination seperately?)
 	switch(fromToBB & CASTLE_SQUARES) {
 		case 0: break;
 		case A1:
-			p->flag.castlingFlags &= ~W_QSIDE_CASTLE; break;
+			p->flag.castlingFlags &= ~W_QSIDE_CASTLE;
+			break;
 		case H1:
-			p->flag.castlingFlags &= ~W_KSIDE_CASTLE; break;
+			p->flag.castlingFlags &= ~W_KSIDE_CASTLE;
+			break;
 		case A8:
-			p->flag.castlingFlags &= ~B_QSIDE_CASTLE; break;
+			p->flag.castlingFlags &= ~B_QSIDE_CASTLE;
+			break;
 		case H8:
-			p->flag.castlingFlags &= ~B_KSIDE_CASTLE; break;
+			p->flag.castlingFlags &= ~B_KSIDE_CASTLE;
+			break;
 		case E1:
-			p->flag.castlingFlags &= ~(W_QSIDE_CASTLE | W_KSIDE_CASTLE); break;
+			p->flag.castlingFlags &= ~(W_QSIDE_CASTLE | W_KSIDE_CASTLE);
+			break;
 		case E8:
-			p->flag.castlingFlags &= ~(B_QSIDE_CASTLE | B_KSIDE_CASTLE); break;
+			p->flag.castlingFlags &= ~(B_QSIDE_CASTLE | B_KSIDE_CASTLE);
+			break;
 		case (A1 | A8):
-			p->flag.castlingFlags &= ~(W_QSIDE_CASTLE | B_QSIDE_CASTLE); break;
+			p->flag.castlingFlags &= ~(W_QSIDE_CASTLE | B_QSIDE_CASTLE);
+			break;
 		case (H1 | H8):
-			p->flag.castlingFlags &= ~(W_KSIDE_CASTLE | B_KSIDE_CASTLE); break;
+			p->flag.castlingFlags &= ~(W_KSIDE_CASTLE | B_KSIDE_CASTLE);
+			break;
 		case (A1 | H8):
-			p->flag.castlingFlags &= ~(W_QSIDE_CASTLE | B_KSIDE_CASTLE); break;
+			p->flag.castlingFlags &= ~(W_QSIDE_CASTLE | B_KSIDE_CASTLE);
+			break;
 		case (H1 | A8):
-			p->flag.castlingFlags &= ~(W_KSIDE_CASTLE | B_QSIDE_CASTLE); break;
+			p->flag.castlingFlags &= ~(W_KSIDE_CASTLE | B_QSIDE_CASTLE);
+			break;
 	}
+	updateZobristCastlingFlag(p, oldCastlingFlags - p->flag.castlingFlags);
+	updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
+
+	// verifyHash(p, m, 4);
 }
 
 void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
+	int oldCastlingFlags = p->flag.castlingFlags;
+	updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
+
 	p->player = !p->player;
 	p->flag = popIrrFlagStack(fs);
+
+	updateZobristCastlingFlag(p, p->flag.castlingFlags - oldCastlingFlags);
 	uint64_t fromBB = SQUARE_BBS[m->from];
 	uint64_t toBB = SQUARE_BBS[m->to];
 	uint64_t fromToBB = fromBB ^ toBB;
@@ -1437,6 +1734,9 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->to] = 0;
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
+
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_CAPTURES:
 			p->pieceBB[m->piece] 	^= fromToBB;
@@ -1449,6 +1749,10 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->materialCount += PIECE_VALUES[m->cPiece];
 			p->squareAttacksBB[m->to] = pieceAttacks(p, m->cPiece, m->to);
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
+
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_EP_CAPTURE:
 			specialBB = (SQUARE_BBS[p->flag.enPassantFlag]);
@@ -1464,6 +1768,10 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->to] = 0;
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
 			p->squareAttacksBB[p->flag.enPassantFlag] = pieceAttacks(p, m->cPiece, m->to);
+
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, m->cPiece, p->flag.enPassantFlag);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_KING_CASTLE:
 			specialBB = (toBB>>1) | (toBB<<1); // F1/8 | H1/8
@@ -1480,6 +1788,11 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->from+1] - PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to+1];
+
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->from+1);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to+1);
 			break;
 		case FLAG_QUEEN_CASTLE:
 			specialBB = (toBB<<1) | (toBB>>2); // D1/8 | A1/8
@@ -1497,6 +1810,10 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[m->piece][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->from-1] - PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to-2];
 
+			updateZobristPieceMove(p, m->piece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->from-1);
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to-2);
 			break;
 		case FLAG_KNIGHT_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB; // Pawn appears
@@ -1509,6 +1826,9 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_KNIGHT+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
+
+			updateZobristPieceMove(p, W_KNIGHT+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_BISHOP_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1521,6 +1841,9 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_BISHOP+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
+
+			updateZobristPieceMove(p, W_BISHOP+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_ROOK_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1533,6 +1856,9 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
+
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_QUEEN_PROMO:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1545,6 +1871,9 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 			p->squareAttacksBB[m->from] = pieceAttacks(p, m->piece, m->from);
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_QUEEN+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
+
+			updateZobristPieceMove(p, W_QUEEN+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_KNIGHT_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1560,6 +1889,10 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_KNIGHT+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->materialCount -= PIECE_VALUES[W_KNIGHT+(6*m->colour)] - PIECE_VALUES[m->piece];
+
+			updateZobristPieceMove(p, W_KNIGHT+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_BISHOP_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1575,6 +1908,10 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_BISHOP+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->materialCount -= PIECE_VALUES[W_BISHOP+(6*m->colour)] - PIECE_VALUES[m->piece];
+
+			updateZobristPieceMove(p, W_BISHOP+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_ROOK_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1590,6 +1927,10 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_ROOK+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->materialCount -= PIECE_VALUES[W_ROOK+(6*m->colour)] - PIECE_VALUES[m->piece];
+
+			updateZobristPieceMove(p, W_ROOK+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 		case FLAG_QUEEN_PROMO_CAPT:
 			p->pieceBB[m->piece] 	^= fromBB;
@@ -1605,8 +1946,16 @@ void unmakeMove(Position* p, Move* m, IrrFlagStack* fs) {
 
 			p->squareValueTotal -= PIECE_SQUARE_VALUES[W_QUEEN+(6*m->colour)][m->to] - PIECE_SQUARE_VALUES[m->piece][m->from];
 			p->materialCount -= PIECE_VALUES[W_QUEEN+(6*m->colour)] - PIECE_VALUES[m->piece];
+
+			updateZobristPieceMove(p, W_QUEEN+(6*m->colour), m->to);
+			updateZobristPieceMove(p, m->cPiece, m->to);
+			updateZobristPieceMove(p, m->piece, m->from);
 			break;
 	}
+	updateZobristEnPassantFlag(p, p->flag.enPassantFlag);
+	updateZobristSideToMove(p);
+
+	// verifyHash(p, m, 5);
 }
 
 int serialiseBoard(int* output, uint64_t pBB) {
@@ -3586,7 +3935,7 @@ void genBlackPawnMoves(MoveList* ml, Position* p) {
 				switch(file) {
 					case 0:
 						if(epGap == 1) {
-							pushMoveList(ml, from, p->flag.enPassantFlag+8, FLAG_EP_CAPTURE, B_PAWN, BLACK, W_PAWN, WHITE);
+							pushMoveList(ml, from, p->flag.enPassantFlag-8, FLAG_EP_CAPTURE, B_PAWN, BLACK, W_PAWN, WHITE);
 						}
 						break;
 					case 1:
@@ -3596,12 +3945,12 @@ void genBlackPawnMoves(MoveList* ml, Position* p) {
 					case 5:
 					case 6:
 						if((epGap == -1) || (epGap == 1)) {
-							pushMoveList(ml, from, p->flag.enPassantFlag+8, FLAG_EP_CAPTURE, B_PAWN, BLACK, W_PAWN, WHITE);
+							pushMoveList(ml, from, p->flag.enPassantFlag-8, FLAG_EP_CAPTURE, B_PAWN, BLACK, W_PAWN, WHITE);
 						}
 						break;
 					case 7:
 						if(epGap == -1) {
-							pushMoveList(ml, from, p->flag.enPassantFlag+8, FLAG_EP_CAPTURE, B_PAWN, BLACK, W_PAWN, WHITE);
+							pushMoveList(ml, from, p->flag.enPassantFlag-8, FLAG_EP_CAPTURE, B_PAWN, BLACK, W_PAWN, WHITE);
 						}
 						break;
 				}
@@ -5678,8 +6027,10 @@ int quiescenceSearch(Position* p, IrrFlagStack* fs, int maxExtensions, int alpha
 		for(int i=0; i<numMoves; i++) {
 			m =  &ml.list[i];
 			makeMove(p, m, fs);
+			// verifyHash(p, m, 2);
 			eval = quiescenceSearch(p, fs, maxExtensions - 1, alpha, beta);
 			unmakeMove(p, m, fs);
+			// verifyHash(p, m, 3);
 			bestScore = (bestScore < eval) ? bestScore : eval;
 			beta = (beta < bestScore) ? beta : bestScore;
 			if(beta <= alpha) {
@@ -5729,8 +6080,10 @@ int alphaBeta(Position* p, IrrFlagStack* fs, int depth, int maxExtensions, int a
 		for(int i=0; i<numMoves; i++) {
 			m = &ml.list[i];
 			makeMove(p, m, fs);
+			// verifyHash(p, m, 0);
 			eval = alphaBeta(p, fs, depth - 1, maxExtensions, alpha, beta, m->cPiece);
 			unmakeMove(p, m, fs);
+			// verifyHash(p, m, 1);
 			bestScore = (bestScore > eval) ? bestScore : eval;
 			alpha = (alpha > bestScore) ? alpha : bestScore;
 			if(alpha >= beta) {
@@ -5757,8 +6110,7 @@ int alphaBeta(Position* p, IrrFlagStack* fs, int depth, int maxExtensions, int a
 
 	return bestScore;
 }
-//
-//
+
 Move ai(Position* p, IrrFlagStack* fs, int depth, int aiMode, int maxExtensions, int verbose) {
 	MoveList ml;
 	Move returnMove;
@@ -5839,6 +6191,279 @@ Move ai(Position* p, IrrFlagStack* fs, int depth, int aiMode, int maxExtensions,
 	return returnMove;
 }
 
+int quiescenceSearchHash(Position* p, IrrFlagStack* fs, HashTable* ht, int depthSearched, int depth, int alpha, int beta) {
+	// printf("quiescenceSearch, Depth=%d, alpha=%d, beta=%d\n", maxExtensions, alpha, beta);
+	// TODO
+	if(depth == 0) {
+		return heuristicEval(p);
+	}
+
+	HashTableEntry* lookup = getFromHashTable(ht, p->hash);
+	// If node is prev. searched at this depth or higher
+	if((lookup != NULL) && (lookup->key == p->hash) && (lookup->depth > depthSearched)) {
+		// printf("Hash table hit!\n");
+		// outputMove()
+		switch(lookup->nodeType) {
+			case PV_NODE:
+			case PV_NODE_CAPTURES:
+				return lookup->score;
+			case ALL_NODE:
+			case ALL_NODE_CAPTURES:
+				alpha = lookup->score;
+				break;
+			case CUT_NODE:
+			case CUT_NODE_CAPTURES:
+				beta = lookup->score;
+				break;
+		}
+	}
+
+	int standPat = heuristicEval(p);
+	if(standPat >= beta) {
+		return standPat;
+	}
+	if(alpha < standPat) {
+		alpha = standPat;
+	}
+
+	MoveList ml;
+	genCaptures(&ml, p, fs);
+	// outputPosition(p);
+	// outputMoveList(&ml, '\n', TRUE);
+	sortCapturesMVVLVA(&ml);
+	// outputMoveList(&ml, '\n', TRUE);
+	int numMoves = ml.used;
+	if(numMoves == 0) {
+		freeMoveList(&ml);
+		// return heuristicEval(p);
+		return standPat;
+	}
+	int bestScore, eval;
+	Move* m;
+	Move bestMove;
+	// int bestIndex = 0;
+	if(p->player == WHITE) {
+		// Maximising player
+		bestScore = INT_MIN;
+		for(int i=0; i<numMoves; i++) {
+			m = &ml.list[i];
+			makeMove(p, m, fs);
+			eval = quiescenceSearchHash(p, fs, ht, depthSearched, depth - 1, alpha, beta);
+			unmakeMove(p, m, fs);
+			bestMove = (bestScore > eval) ? *m : bestMove;
+			bestScore = (bestScore > eval) ? bestScore : eval;
+			alpha = (alpha > bestScore) ? alpha : bestScore;
+			if(alpha >= beta) {
+				addToHashTable(ht, p->hash, *m, depthSearched, bestScore, CUT_NODE_CAPTURES);
+				freeMoveList(&ml);
+				return bestScore;
+				// break;
+			}
+		}
+	} else {
+		// Minimising player
+		bestScore = INT_MAX;
+		for(int i=0; i<numMoves; i++) {
+			m =  &ml.list[i];
+			makeMove(p, m, fs);
+			// verifyHash(p, m, 2);
+			eval = quiescenceSearchHash(p, fs, ht, depthSearched, depth - 1, alpha, beta);
+			unmakeMove(p, m, fs);
+			// verifyHash(p, m, 3);
+			bestMove = (bestScore < eval) ? *m : bestMove;
+			bestScore = (bestScore < eval) ? bestScore : eval;
+			beta = (beta < bestScore) ? beta : bestScore;
+			if(beta <= alpha) {
+				addToHashTable(ht, p->hash, *m, depthSearched, bestScore, ALL_NODE_CAPTURES);
+				freeMoveList(&ml);
+				return bestScore;
+				// break;
+			}
+		}
+	}
+	// printf("Returning: %d", bestScore);
+	freeMoveList(&ml);
+
+	addToHashTable(ht, p->hash, bestMove, depthSearched, bestScore, PV_NODE_CAPTURES);
+	return bestScore;
+}
+
+int iterativeDeepeningSearch(Position* p, IrrFlagStack* fs, HashTable* ht, int depthSearched, int depth, int maxExtensions, int alpha, int beta, int capture) {
+	int bestScore, eval;
+	HashTableEntry* lookup = getFromHashTable(ht, p->hash);
+	Move refutation;
+	// If node is prev. searched at this depth or higher
+	if((lookup != NULL) && (lookup->key == p->hash) && (lookup->depth > depthSearched)) {
+		printf("Hash table hit! %d\n", lookup->nodeType);
+		// outputMove()
+		switch(lookup->nodeType) {
+			case PV_NODE:
+				return lookup->score;
+			case ALL_NODE:
+				alpha = lookup->score;
+				break;
+			case CUT_NODE:
+				beta = lookup->score;
+				break;
+			// case PV_NODE_CAPTURES:
+			// 	refutation = lookup->move;
+			// 	makeMove(p, &refutation, fs);
+			// 	// verifyHash(p, m, 0);
+			// 	eval = iterativeDeepeningSearch(p, fs, ht, depthSearched + 1, depth - 1, maxExtensions, alpha, beta, refutation.cPiece);
+			// 	unmakeMove(p, &refutation, fs);
+			// 	switch(p->player) {
+			// 		case WHITE:
+			// 			if(eval >= beta) {
+			// 				return eval;
+			// 			}
+			// 			break;
+			// 		case BLACK:
+			// 			if(eval <= alpha) {
+			// 				return eval;
+			// 			}
+			// 			break;
+			// 	}
+		}
+	}
+
+	if(depth == 0) {
+		switch(capture) {
+			case 0:
+				return heuristicEval(p);
+			default:
+				return quiescenceSearchHash(p, fs, ht, depthSearched, maxExtensions, alpha, beta);
+		}
+	}
+
+	MoveList ml;
+	genLegalMoves(&ml, p, fs);
+	sortCapturesMVV(&ml);
+	int numMoves = ml.used;
+	if(numMoves == 0) {
+		freeMoveList(&ml);
+		switch(scoreFinalPosition(p)) {
+			case RES_WHITE_WIN:
+				return 10000;
+			case RES_BLACK_WIN:
+				return -10000;
+			default:
+				return 0;
+		}
+	}
+	Move* m;
+	Move bestMove = ml.list[0];
+	// int bestIndex = 0;
+	if(p->player == WHITE) {
+		// Maximising player
+		bestScore = INT_MIN;
+		for(int i=0; i<numMoves; i++) {
+			m = &ml.list[i];
+			makeMove(p, m, fs);
+			// verifyHash(p, m, 0);
+			eval = iterativeDeepeningSearch(p, fs, ht, depthSearched + 1, depth - 1, maxExtensions, alpha, beta, m->cPiece);
+			unmakeMove(p, m, fs);
+			// verifyHash(p, m, 1);
+			bestMove = (bestScore > eval) ? *m : bestMove;
+			bestScore = (bestScore > eval) ? bestScore : eval;
+			alpha = (alpha > bestScore) ? alpha : bestScore;
+			if(alpha >= beta) {
+				// beta cutoff
+				addToHashTable(ht, p->hash, *m, depthSearched, bestScore, CUT_NODE);
+				freeMoveList(&ml);
+				return bestScore;
+				// break;
+			}
+		}
+	} else {
+		// Minimising player
+		bestScore = INT_MAX;
+		for(int i=0; i<numMoves; i++) {
+			m =  &ml.list[i];
+			makeMove(p, m, fs);
+			eval = iterativeDeepeningSearch(p, fs, ht, depthSearched + 1, depth - 1, maxExtensions, alpha, beta, m->cPiece);
+			unmakeMove(p, m, fs);
+			bestMove = (bestScore < eval) ? *m : bestMove;
+			bestScore = (bestScore < eval) ? bestScore : eval;
+			beta = (beta < bestScore) ? beta : bestScore;
+			if(beta <= alpha) {
+				addToHashTable(ht, p->hash, *m, depthSearched, bestScore, ALL_NODE);
+				freeMoveList(&ml);
+				return bestScore;
+				// break;
+			}
+		}
+	}
+	// printf("Returning: %d", bestScore);
+	freeMoveList(&ml);
+
+	addToHashTable(ht, p->hash, bestMove, depthSearched, bestScore, PV_NODE);
+	return bestScore;
+
+
+}
+
+Move iterativeDeepeningAI(Position* p, IrrFlagStack* fs, HashTable* ht, int maxDepth, int maxExtensions) {
+
+	int depth, numMoves, i, worstScore, alpha, beta, bestScore;
+	Move m;
+	worstScore = (p->player == WHITE) ? INT_MIN : INT_MAX;
+
+	MoveList rootMoves;
+	genLegalMoves(&rootMoves, p, fs);
+	numMoves = rootMoves.used;
+
+	int rootValues[numMoves];
+	for(i=0; i<numMoves; i++) {
+		rootValues[i] = worstScore;
+	}
+
+	alpha = INT_MIN;
+	beta = INT_MAX;
+	if(p->player == WHITE) {
+		bestScore = INT_MIN;
+		for(depth = 0; depth<=maxDepth; depth++) {
+			for(i=0; i<numMoves; i++) {
+				m = rootMoves.list[i];
+
+				makeMove(p, &m, fs);
+				rootValues[i] = -iterativeDeepeningSearch(p, fs, ht, 0, depth, maxExtensions, alpha, beta, m.cPiece);
+				unmakeMove(p, &m, fs);
+
+				// bestScore = (-rootValues[i] > bestScore) ? -rootValues[i] : bestScore;
+				// alpha = (alpha > bestScore) ? alpha : bestScore;
+			}
+			qsortMoveList(&rootMoves, rootValues, numMoves);
+			printf("Depth = %d\n", depth);
+			for(i=0; i<numMoves; i++) {
+				outputMove(&rootMoves.list[i], FALSE);
+				printf(" : %d\n", rootValues[i]);
+			}
+		}
+	} else {
+		bestScore = INT_MAX;
+		for(depth = 0; depth<=maxDepth; depth++) {
+			for(i=0; i<numMoves; i++) {
+				m = rootMoves.list[i];
+
+				makeMove(p, &m, fs);
+				rootValues[i] = iterativeDeepeningSearch(p, fs, ht, 0, depth, maxExtensions, alpha, beta, m.cPiece);
+				unmakeMove(p, &m, fs);
+
+				// bestScore = (rootValues[i] < bestScore) ? rootValues[i] : bestScore;
+				// beta = (beta < bestScore) ? beta : bestScore;
+			}
+			qsortMoveList(&rootMoves, rootValues, numMoves);
+			printf("Depth = %d\n", depth);
+			for(i=0; i<numMoves; i++) {
+				outputMove(&rootMoves.list[i], FALSE);
+				printf(" : %d\n", rootValues[i]);
+			}
+		}
+	}
+
+	return rootMoves.list[0];
+}
+
 
 Move* inputPlayerMove(MoveList *ml) {
 	// char inp[6];
@@ -5879,8 +6504,17 @@ void outputResult(int result) {
 	}
 }
 
+void verifyHash(Position* p, Move* m, int code) {
+	if(p->hash != calcZobristFromScratch(p)) {
+		printf("Hash mismatch: %d %d (caller code: %d)\n", p->hash, calcZobristFromScratch(p), code);
+		// calcZobristFromScratchVerbose(p);
+		outputMove(m, TRUE);
+		outputPosition(p);
+		exit(-1);
+	}
+}
 
-int onePlayerGame(int colour, int depth, int aiType, int maxExtensions, int verbose) {
+int playGame(int player1, int player2, int depth1, int maxExtensions1, int depth2, int maxExtensions2, int verbose) {
 	Position p;
 	setupStartPosition(&p);
 	IrrFlagStack fs;
@@ -5893,17 +6527,18 @@ int onePlayerGame(int colour, int depth, int aiType, int maxExtensions, int verb
 	// MoveList captures;
 	initMoveList(&history, 40);
 	int result = 0;
+
+	HashTable ht;
+	initHashTable(&ht);
+
+
 	while(TRUE) {
-		// pushBoardStack(&bs, b);
-		outputPosition(&p);
+
 		// outputAttackMaps(&p);
-		// freeMoveList(&legalMoves);
 		genLegalMoves(&legalMoves, &p, &fs);
+		outputPosition(&p);
 		sortCapturesMVV(&legalMoves);
-		// freeMoveList(&captures);
-		// generateCaptures(&captures, &b);
-		// printf("Captures: \n");
-		// outputMoveList(&captures);
+
 		if(legalMoves.used == 0) {
 			result = finalResult(&p);
 			break;
@@ -5917,7 +6552,7 @@ int onePlayerGame(int colour, int depth, int aiType, int maxExtensions, int verb
 		// 	result = ...;
 		// 	break;
 		// }
-		if(p.player == colour) {
+		if((p.player == WHITE && player1 == HUMAN) || (p.player == BLACK && player2 == HUMAN)) {
 			do {
 				do {
 					inp = inputPlayerMove(&legalMoves);
@@ -5932,28 +6567,48 @@ int onePlayerGame(int colour, int depth, int aiType, int maxExtensions, int verb
 				}
 			} while(inp == NULL);
 
-		} else {
+		} else if(p.player == WHITE) {
 			printf("Thinking...\n");
 
-			playerMove = ai(&p, &fs, depth, aiType, maxExtensions, verbose);
+			if(player1 == IDS) {
+				playerMove = iterativeDeepeningAI(&p, &fs, &ht, depth1, maxExtensions1);
+			} else {
+				playerMove = ai(&p, &fs, depth1, player1, maxExtensions1, verbose);
+			}
 
 			printf("Computer moves: ");
 			outputMove(&playerMove, FALSE);
 			printf("\n");
-			// playerMove = inputPlayerMove(&legalMoves);
+
+		} else {
+			printf("Thinking...\n");
+
+			if(player2 == IDS) {
+				playerMove = iterativeDeepeningAI(&p, &fs, &ht, depth2, maxExtensions2);
+			} else {
+				playerMove = ai(&p, &fs, depth2, player2, maxExtensions2, verbose);
+			}
+
+
+			printf("Computer moves: ");
+			outputMove(&playerMove, FALSE);
+			printf("\n");
 		}
 		insertMoveList(&history, playerMove);
 		makeMove(&p, &playerMove, &fs);
+
 		// freeMoveList(&legalMoves);
 	}
-	// if(result == 0) {
-	// 	result = scorePosition(&b);
-	// }
+
 	outputResult(result);
 	freeMoveList(&legalMoves);
 	freeMoveList(&history);
-	// return result;
-	return 0;
+
+
+	freeHashTable(&ht);
+
+
+	return result;
 }
 
 void testPosition() {
@@ -6061,6 +6716,8 @@ long perft(Position* b, IrrFlagStack* fs, int depth) {
 		for(i=0; i<ml.used; i++) {
 			m = ml.list[i];
 			makeMove(b, &m, fs);
+
+
 			total += perft(b, fs, depth - 1);
 			unmakeMove(b, &m, fs);
 			if(depth == 6) {
@@ -6100,44 +6757,98 @@ void testAI(int depth) {
 
 int main(int argc, char** argv) {
 	initGlobalArrays();
-	if(argc > 2) {
+
+	int defaultDepth = 4;
+	int defaultExtensions = 12;
+
+	if(argc == 2) {
+		int depth;
+		char* input1 = argv[1];
+		sscanf(argv[1], "%d", &depth);
+		testPerft(depth);
+	} else if(argc == 3) {
+		int a1, a2;
 		char* input1 = argv[1];
 		char* input2 = argv[2];
-		int mode, depth, extensions;
-		sscanf(argv[1], "%d", &mode);
-		sscanf(argv[2], "%d", &depth);
-		sscanf(argv[3], "%d", &extensions);
-		if(mode < 0 || mode > 10 || depth < 0) {
-			return -1;
+		sscanf(argv[1], "%d", &a1);
+		sscanf(argv[2], "%d", &a2);
+		if(a1 == HUMAN && a2 == HUMAN) {
+			printf("Two player mode\n");
+			playGame(HUMAN, HUMAN, 0, 0, 0, 0, TRUE);
+		} else if(a1 == HUMAN && a2 != HUMAN) {
+			if(a2 == NORMAL_AI) {
+				printf("Playing white vs. normal AI with default settings\n");
+				playGame(HUMAN, NORMAL_AI, 0, 0, defaultDepth, defaultExtensions, TRUE);
+			} else if(a2 == IDS) {
+				printf("Playing white vs. IDS with default settings\n");
+				playGame(HUMAN, IDS, 0, 0, defaultDepth, defaultExtensions, TRUE);
+			}
+		} else if(a1 != HUMAN && a2 == HUMAN) {
+			if(a1 == NORMAL_AI) {
+				printf("Playing black vs. normal AI with default settings\n");
+				playGame(NORMAL_AI, HUMAN, defaultDepth, defaultExtensions, 0, 0, TRUE);
+			} else if(a1 == IDS) {
+				printf("Playing black vs. IDS with default settings\n");
+				playGame(IDS, HUMAN, defaultDepth, defaultExtensions, 0, 0, TRUE);
+			}
+		} else if(a1 == NORMAL_AI && a2 == NORMAL_AI) {
+			printf("Watching normal AI play itself with default settings\n");
+			playGame(NORMAL_AI, NORMAL_AI, defaultDepth, defaultExtensions, defaultDepth, defaultExtensions, TRUE);
 		}
-		switch(mode) {
-			case 0:
-				testPerft(depth); break;
-			case 1:
-				printf("Selected dirtyAI, WHITE\n");
-				onePlayerGame(WHITE, depth, DIRTY_AI, extensions, TRUE); break;
-			case 2:
-				printf("Selected dirtyAI, BLACK\n");
-				onePlayerGame(BLACK, depth, DIRTY_AI, extensions, TRUE); break;
-			case 3:
-				printf("Selected normalAI, WHITE\n");
-				onePlayerGame(WHITE, depth, NORMAL_AI, extensions, TRUE); break;
-			case 4:
-				printf("Selected normalAI, BLACK\n");
-				onePlayerGame(BLACK, depth, NORMAL_AI, extensions, TRUE); break;
-			case 5:
-				testAI(depth);
-			case 6:
-				testPosition();
-
-
+	} else if(argc == 5) {
+		int a1, a2, a3, a4;
+		char* input1 = argv[1];
+		char* input2 = argv[2];
+		char* input3 = argv[3];
+		char* input4 = argv[4];
+		sscanf(argv[1], "%d", &a1);
+		sscanf(argv[2], "%d", &a2);
+		sscanf(argv[3], "%d", &a3);
+		sscanf(argv[4], "%d", &a4);
+		if(a1 == HUMAN && a2 == IDS) {
+			printf("Playing white vs. IDS with depth=%d ext=%d\n", a3, a4);
+			playGame(HUMAN, IDS, 0, 0, a3, a4, TRUE);
 		}
 	}
+	// 	char* input1 = argv[1];
+	// 	char* input2 = argv[2];
+	// 	int mode, depth, extensions;
+	// 	sscanf(argv[1], "%d", &mode);
+	// 	sscanf(argv[2], "%d", &depth);
+	// 	sscanf(argv[3], "%d", &extensions);
+	// 	if(mode < 0 || mode > 10 || depth < 0) {
+	// 		return -1;
+	// 	}
+	// 	switch(mode) {
+	// 		case 0:
+	// 			testPerft(depth); break;
+	// 		case 1:
+	// 			printf("Selected dirtyAI, WHITE\n");
+	// 			playGame(WHITE, depth, DIRTY_AI, extensions, TRUE); break;
+	// 		case 2:
+	// 			printf("Selected dirtyAI, BLACK\n");
+	// 			playGame(BLACK, depth, DIRTY_AI, extensions, TRUE); break;
+	// 		case 3:
+	// 			printf("Selected normalAI, WHITE\n");
+	// 			playGame(WHITE, depth, NORMAL_AI, extensions, TRUE); break;
+	// 		case 4:
+	// 			printf("Selected normalAI, BLACK\n");
+	// 			playGame(BLACK, depth, NORMAL_AI, extensions, TRUE); break;
+	// 		case 5:
+	// 			printf("Selected 2 player game\n");
+	// 			playGame(WHITE, depth, HUMAN, extensions, TRUE); break;
+	// 		case 6:
+	// 			testAI(depth);
+	// 		case 7:
+	// 			testPosition();
+	//
+	// 	}
+	// }
 	// testPosition();
 	// testMove();
 	// testMoveGen();
 	// testPerft(5);
-	// onePlayerGame(WHITE, 0, 0, 0);
+	// playGame(WHITE, 0, 0, 0);
 	freeGlobalArrays();
 	return 0;
 }
